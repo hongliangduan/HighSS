@@ -127,7 +127,7 @@ Pairing order defines topology. For example, `2-17,6-13` and `2-13,6-17` use the
 
 - Type: path
 - Required: yes
-- Recommended value: `checkpoints/best-model-epoch68-rmsd5.0984.ckpt`
+- Recommended value: `checkpoints/com-FT.ckpt`
 
 The source package does not include the model file. Provide the custom checkpoint explicitly.
 
@@ -691,7 +691,7 @@ highss \
   --disulfide_pairs "2-25,6-21,10-16" \
   --msa_mode target \
   --msa_max_seqs 4096 \
-  --checkpoint checkpoints/best-model-epoch68-rmsd5.0984.ckpt \
+  --checkpoint checkpoints/com-FT.ckpt \
   --ccd_path checkpoints/ccd.pkl \
   --work_dir runs/target_25aa_3ss \
   --suffix target_25aa_3ss \
