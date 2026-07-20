@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CHECKPOINT="${CHECKPOINT:-$ROOT/checkpoints/best-model-epoch68-rmsd5.0984.ckpt}"
+CHECKPOINT="${CHECKPOINT:-$ROOT/checkpoints/com-FT.ckpt}"
 CCD_PATH="${CCD_PATH:-$ROOT/checkpoints/ccd.pkl}"
 GPU_ID="${GPU_ID:-0}"
 
