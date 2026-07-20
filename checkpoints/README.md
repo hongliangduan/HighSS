@@ -18,7 +18,7 @@ HighSS-main/
     └── ccd.pkl
 ```
 
-`boltz1_conf.ckpt` is not required.
+
 
 The model and CCD files are excluded by the root `.gitignore` and should not
 be committed to GitHub.
