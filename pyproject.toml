@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "highss"
+version = "0.1.1rc3"
+description = "Programmable disulfide topology for de novo multi-disulfide peptide binder design"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "gemmi>=0.6.5",
+  "biopython==1.84",
+  "ipython>=8.0",
+  "logmd==0.1.45",
+  "matplotlib>=3.8",
+  "numpy==1.26.3",
+  "pyyaml==6.0.2",
+  "seaborn>=0.13",
+]
+
+[project.scripts]
+highss = "highss.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["highss*"]
+
+[tool.setuptools.package-data]
+highss = ["configs/*.yaml"]
