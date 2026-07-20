@@ -12,7 +12,7 @@
 
 **Programmable disulfide topology enables de novo design of multi-disulfide peptide binders**
 
-
+Full author, journal, DOI, and preprint details should be added here when the manuscript citation is finalized.
 
 ## Overview
 
@@ -121,7 +121,7 @@ highss \
   --disulfide_pairs "2-25,6-21,10-16" \
   --msa_mode target \
   --msa_max_seqs 4096 \
-  --checkpoint checkpoints/best-model-epoch68-rmsd5.0984.ckpt \
+  --checkpoint checkpoints/com-FT.ckpt \
   --ccd_path checkpoints/ccd.pkl \
   --gpu_id 0 \
   --design_samples 32 \
