@@ -58,7 +58,7 @@ The provided setup script creates a Python 3.10 conda environment and installs t
 Required external files are not included in the source archive:
 
 ```text
-checkpoints/best-model-epoch68-rmsd5.0984.ckpt
+checkpoints/com-FT.ckpt
 checkpoints/ccd.pkl
 ```
 
@@ -103,7 +103,7 @@ highss \
   --binder_length 18 \
   --disulfide_pairs "2-17,6-13" \
   --msa_mode none \
-  --checkpoint checkpoints/best-model-epoch68-rmsd5.0984.ckpt \
+  --checkpoint checkpoints/com-FT.ckpt \
   --ccd_path checkpoints/ccd.pkl \
   --gpu_id 0 \
   --design_samples 32 \
