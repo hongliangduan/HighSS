@@ -12,7 +12,7 @@
 
 **Programmable disulfide topology enables de novo design of multi-disulfide peptide binders**
 
-Full author, journal, DOI, and preprint details should be added here when the manuscript citation is finalized.
+
 
 ## Overview
 
