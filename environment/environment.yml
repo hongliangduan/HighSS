@@ -1,1 +1,11 @@
+name: highss
+channels:
+  - conda-forge
+  - defaults
 
+# setup.sh is the canonical installer because the validated PyTorch build
+# comes from the CUDA 12.8 PyTorch wheel index. Python runtime dependencies
+# are declared in the root and boltz pyproject.toml files.
+dependencies:
+  - python=3.10
+  - pip
