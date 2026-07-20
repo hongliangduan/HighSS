@@ -12,11 +12,12 @@ highss \
   --target_pdb "$ROOT/examples/mdm2/mdm2_pro.pdb" \
   --target_chains A \
   --target_name mdm2 \
-  --binder_length 18 \
-  --disulfide_pairs "2-17,6-13" \
-  --msa_mode none \
+  --binder_length 25 \
+  --disulfide_pairs "2-25,6-21,10-16" \
+  --msa_mode target \
+  --msa_max_seqs 4096 \
   --checkpoint "$CHECKPOINT" \
   --ccd_path "$CCD_PATH" \
   --gpu_id "$GPU_ID" \
   --design_samples 32 \
-  --suffix mdm2_18aa_2ss
+  --suffix mdm2_25aa_3ss_target_msa

@@ -1,0 +1,17 @@
+examples:
+  one_disulfide_14aa:
+    binder_length: 14
+    disulfide_pairs: "2-13"
+    note: "One pair; this is a Cys placement, not an alternative pairing topology."
+  two_disulfide_nested_18aa:
+    binder_length: 18
+    disulfide_pairs: "2-17,6-13"
+  two_disulfide_crossed_18aa:
+    binder_length: 18
+    disulfide_pairs: "2-13,6-17"
+  three_disulfide_ick_like_25aa:
+    binder_length: 25
+    disulfide_pairs: "2-16,6-21,10-25"
+  three_disulfide_nested_ladder_25aa:
+    binder_length: 25
+    disulfide_pairs: "2-25,6-21,10-16"
