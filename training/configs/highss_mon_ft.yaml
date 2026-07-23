@@ -1,4 +1,4 @@
-# HighSS complex fine-tuning configuration, continued sequentially from mon-FT.
+# HighSS monomer fine-tuning configuration.
 # Values documented in the manuscript are used directly. Values not stated in
 # the manuscript retain the original Boltz/HighSS training-template defaults.
 trainer:
@@ -6,33 +6,33 @@ trainer:
   devices: 1
   precision: 32
   gradient_clip_val: 10.0
-  max_epochs: 69  # Lightning epochs 0–68; reported best-validation epoch: 68
+  max_epochs: 58  # Lightning epochs 0–57; reported best-validation epoch: 57
   check_val_every_n_epoch: 1
   num_sanity_val_steps: -1
   accumulate_grad_batches: 64
 
 seed: 42
-output: training/outputs/com_ft
-pretrained: training/checkpoints/mon-FT.ckpt
+output: training/outputs/mon_ft
+pretrained: training/checkpoints/boltz1.ckpt
 resume: null
 disable_checkpoint: false
 matmul_precision: null
 save_top_k: -1
 checkpoint_monitor: val/best_rmsd
 checkpoint_mode: min
-release_checkpoint_name: com-FT.ckpt
+release_checkpoint_name: mon-FT.ckpt
 
 # Optional experiment tracking; authenticate outside this file.
 # wandb:
-#   name: highss-com-ft
+#   name: highss-mon-ft
 #   project: HighSS
 #   entity: YOUR_WANDB_ENTITY
 
 data:
   datasets:
     - _target_: boltz.data.module.training.DatasetConfig
-      target_dir: training/data/complex/processed
-      msa_dir: training/data/complex/processed/msa
+      target_dir: training/data/monomer/processed
+      msa_dir: training/data/monomer/processed/msa
       prob: 1.0
       sampler:
         _target_: boltz.data.sample.cluster.ClusterSampler
@@ -40,7 +40,7 @@ data:
         _target_: boltz.data.crop.boltz.BoltzCropper
         min_neighborhood: 0
         max_neighborhood: 40
-      split: training/data/complex/validation_ids.txt
+      split: training/data/monomer/validation_ids.txt
   filters:
     - _target_: boltz.data.filter.dynamic.size.SizeFilter
       min_chains: 1
