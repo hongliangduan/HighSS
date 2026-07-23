@@ -317,7 +317,6 @@ boltz/LICENSE
 
 Additional third-party copyright and license notices embedded in individual source files must be retained.
 
-A separate license for the HighSS-specific source should be added at the repository root before public redistribution.
 
 ## Disclaimer
 
