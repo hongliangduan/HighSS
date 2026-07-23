@@ -1,0 +1,6 @@
+# Install the vendored/study-compatible Boltz-1 source before these extras.
+hydra-core
+omegaconf
+pytorch-lightning
+torch
+wandb

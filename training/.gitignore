@@ -1,0 +1,16 @@
+# Large model and training artefacts
+checkpoints/*.ckpt
+checkpoints/*.pkl
+outputs/**
+!outputs/README.md
+data/**/processed/
+data/**/msa/
+data/**/*validation_ids.txt
+
+# Logs and caches
+wandb/
+lightning_logs/
+__pycache__/
+*.py[cod]
+*.log
+.DS_Store
