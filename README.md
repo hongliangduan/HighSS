@@ -48,8 +48,6 @@ HighSS currently supports:
 - automatic Apo prediction;
 - local model checkpoint and CCD cache files.
 
-HighSS does not include ProteinMPNN, LigandMPNN, Rosetta, AlphaFold3, or Chai-based post-processing.
-
 ## Requirements
 
 The provided setup script creates a Python 3.10 conda environment and installs the CUDA 12.8 PyTorch build.
