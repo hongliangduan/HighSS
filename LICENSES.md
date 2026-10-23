@@ -2,7 +2,7 @@
 
 ## HighSS-specific source
 
-A license for the HighSS-specific source has not yet been included in this release candidate. Add the intended project license at the repository root before public redistribution.
+HighSS-specific source is distributed under the MIT license in the repository-root `LICENSE` file.
 
 ## Vendored Boltz runtime
 

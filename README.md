@@ -215,7 +215,7 @@ Target residue numbering is taken from the supplied PDB.
 
 ## Disulfide objective
 
-The validated RC3 disulfide settings are:
+The disulfide settings validated in RC3 (unchanged in v0.2.0) are:
 
 ```text
 distance mode:                   bounded
@@ -231,7 +231,59 @@ dihedral |target|/tolerance:     90° / 45°
 angle/dihedral loss weights:     0.0005 / 0.0002
 ```
 
-These terms guide optimization but do not guarantee that every final prediction contains the requested geometry. The final Holo and Apo structures must still be screened.
+These coordinate-based terms are computed from sampled structures. With the defaults `--disulfide_grad_steps 0` and
+`--disulfide_sds_scale 0`, they enter the reported total but contribute no gradient to the sequence logits. Direct geometry
+backpropagation is enabled with `--disulfide_grad_steps K` for `K >= 1`; the optional SDS branch is another geometry-gradient
+route. Final Holo and Apo structures still require geometric screening.
+
+Since v0.2.0 the prescribed pairing also reaches the sequence logits through the distogram of the model. The defaults are `--disulfide_distogram_loss 4.0`, `--disulfide_distogram_form nll`, `--loop_fix_cys true`, `--pre_drop_bonds true` and `--loop_profile token`; they are described in `docs/PARAMETERS.md` (section 11) and `RELEASE_NOTES.md`. Add `--rc3_defaults true` to reproduce RC3 designs.
+
+`--use_disulfide_loss` (default `true`) is the master switch of the disulfide loss. With `--use_disulfide_loss false` no
+disulfide loss term exists in any stage: the distogram term and the structure terms above are all set to 0. This is not the RC3
+behaviour, which had the structure terms; see `docs/PARAMETERS.md`, section 11.
+
+### Choosing a disulfide-loss mode
+
+The table below gives the options to append to a normal `highss` command. Each mode uses the same target, checkpoint and
+optimization budget unless those arguments are changed explicitly.
+
+| Mode | Options | Explicit disulfide-loss gradient to sequence logits |
+|---|---|---|
+| No disulfide loss | `--use_disulfide_loss false` | None; both the distogram and coordinate-based loss terms are removed |
+| v0.2.1 default | `--use_disulfide_loss true --disulfide_distogram_loss 4 --disulfide_distogram_form nll --disulfide_grad_steps 0 --disulfide_sds_scale 0` | Distogram pairing term |
+| Geometry only, K = 1 | `--use_disulfide_loss true --disulfide_distogram_loss 0 --disulfide_grad_steps 1 --disulfide_sds_scale 0` | Coordinate-based geometry terms through the final denoising step |
+| Distogram + geometry, K = 1 | `--use_disulfide_loss true --disulfide_distogram_loss 4 --disulfide_distogram_form nll --disulfide_grad_steps 1 --disulfide_sds_scale 0` | Both routes |
+| RC3-compatible loop | `--rc3_defaults true --disulfide_grad_steps 0 --disulfide_sds_scale 0` | None from the explicit disulfide losses; the RC3 coordinate-based terms remain in the reported total |
+
+`--disulfide_pairs` remains required in every mode. Disabling the loss keeps the prescribed Cys and bond-input settings, so
+the pairing can still affect the model and the other loss terms through input conditioning. RC3-compatible mode also restores
+the RC3 feature settings: `loop_fix_cys false`, `pre_drop_bonds false` and `loop_profile mean`.
+
+Setting `--disulfide_loss 0` alone does not disable the entire disulfide objective: scheduled stage weights and the distogram
+term may remain active. Setting `--disulfide_grad_steps 0` alone disables the direct sampler gradient but leaves the default
+distogram-gradient route active. `--use_disulfide_loss false` rejects explicitly requested nonzero disulfide-loss weights or
+gradient routes.
+
+For a runnable MDM2 example, select one mode per invocation:
+
+```bash
+bash examples/run_highss_disulfide_modes.sh none
+bash examples/run_highss_disulfide_modes.sh default
+bash examples/run_highss_disulfide_modes.sh geometry
+bash examples/run_highss_disulfide_modes.sh both
+bash examples/run_highss_disulfide_modes.sh rc3
+```
+
+Each invocation generates one 18-residue MDM2 binder with pairs `2-17,6-13`, seed 1 and the full default optimization budget.
+Set `CHECKPOINT`, `CCD_PATH`, `GPU_ID`, `DESIGN_SAMPLES`, `SEED`, `WORK_DIR` or `SUFFIX` as needed, for example:
+
+```bash
+GPU_ID=3 CHECKPOINT=/path/to/com-FT.ckpt CCD_PATH=/path/to/ccd.pkl \
+  bash examples/run_highss_disulfide_modes.sh geometry
+```
+
+`--debug_grad_norm true` reports the combined gradient of all active `disulfide*` terms. For a K = 0 versus K = 1 geometry-gradient
+check, set `--disulfide_distogram_loss 0 --disulfide_sds_scale 0` in both runs and keep the remaining settings the same.
 
 ## Outputs
 
@@ -277,6 +329,17 @@ A practical screening workflow should consider:
 
 Generate multiple independent samples and rank or filter the resulting designs. A successful software run does not imply that every candidate passes disulfide-geometry or biochemical validation.
 
+## Loss trajectory
+
+`scripts/plot_loss_trajectory.py` draws the loss trajectory of one design from the log of a run: the total loss and its weighted components over the optimization stages, the raw contact, confidence and distogram terms, the SG–SG distances of the prescribed pairs, and the iPTM of the semi-greedy candidates. It writes the figure (PNG and PDF) and a CSV with every plotted value, and prints a summary and a suggested figure legend.
+
+```bash
+PYTHONUNBUFFERED=1 highss ... 2>&1 | tee run.txt
+python scripts/plot_loss_trajectory.py run.txt --target MDM2
+```
+
+The script needs only Python, NumPy and Matplotlib. Example logs and figures are in [`examples/loss_trajectory/`](examples/loss_trajectory/README.md).
+
 ## Fine-tuning
 
 Reference Boltz-1 fine-tuning scripts and configurations for the
@@ -292,6 +355,15 @@ the original processed inputs, validation splits and study-compatible Boltz
 source revision; these boundaries are documented in
 [`training/PARAMETER_SOURCES.md`](training/PARAMETER_SOURCES.md).
 
+## Tests
+
+```bash
+pip install -e ".[test]"
+python -m pytest tests
+```
+
+The tests use toy tensors and stubbed models; they need neither a checkpoint nor a GPU.
+
 ## Reproducibility
 
 For each release, record:
@@ -303,7 +375,7 @@ For each release, record:
 - binder length and disulfide topology;
 - MSA mode;
 - random seeds, when applicable;
-- optimization settings; and
+- optimization settings, including whether `--rc3_defaults true` or `--use_disulfide_loss false` was used; and
 - GPU, PyTorch, and CUDA versions.
 
 ## License and bundled runtime
