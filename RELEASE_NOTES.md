@@ -1,78 +1,53 @@
 # HighSS configuration notes
 
-## Default disulfide guidance
+## Disulfide loss: enabled or disabled
 
-Disulfide loss is enabled by default. The distogram pairing term supplies a gradient to the sequence logits; the coordinate-based
-geometry terms are computed from sampled structures and enter the reported total loss. Direct geometry backpropagation is
-controlled separately.
+Disulfide loss is enabled by default. Use one switch for the standard comparison:
 
-| Option | Default | Effect |
+| Setting | Command option | Behavior |
 |---|---|---|
-| `--use_disulfide_loss` | `true` | Enables explicit disulfide-loss terms |
-| `--disulfide_distogram_loss` | `4.0` | Weight of the CB-CB pairing term |
-| `--disulfide_distogram_form` | `nll` | Uses the negative log probability of the bonding window |
-| `--disulfide_grad_steps` | `0` | No gradient through sampled coordinates |
-| `--disulfide_sds_scale` | `0.0` | Denoiser-estimate geometry branch disabled |
-| `--loop_fix_cys` | `true` | Fixes prescribed Cys in every loop forward pass |
-| `--pre_drop_bonds` | `true` | Omits the bond feature during the pre-run only |
-| `--loop_profile` | `token` | Uses a per-token binder profile |
+| Enabled (default) | `--use_disulfide_loss true` | Standard distogram and geometry objectives with backpropagation |
+| Disabled | `--use_disulfide_loss false` | No explicit disulfide-loss terms or geometry gradient steps |
 
-The distogram term is -log P(CB-CB distance in the bonding window), averaged over the prescribed pairs. Its default window is
-3.3-4.8 A. It is differentiable without structure sampling. CB-CB guidance does not guarantee SG-SG closure in the final prediction;
-use `scripts/check_disulfide_geometry.py` to inspect generated structures.
+Omitting the option selects the enabled setting. The geometry gradient passes through the final denoising operation; earlier
+sampling steps do not retain a gradient graph. There is no separate gradient option to add for a standard run.
 
-The optimization defaults are 30 pre-run, 80 soft, 45 temperature and 5 hard iterations, followed by 2 semi-greedy steps.
-Coordinate-based distance, worst-pair, angle and dihedral weights and their stage schedule are listed in `docs/PARAMETERS.md`.
+## Standard objective
 
-## Geometry backpropagation
+The standard disulfide objective includes the distogram pairing term and coordinate-based SG-SG distance, worst-pair, angle and
+dihedral terms. The distogram loss is -log P(CB-CB distance in the bonding window), averaged over prescribed pairs, with weight
+4.0 and a 3.3-4.8 A window. Geometry terms are evaluated during structure-prediction stages and use the scheduled weights in
+`docs/PARAMETERS.md`.
 
-- `--disulfide_grad_steps K`: with K >= 1, the last K diffusion steps retain an autograd graph for the coordinate-based disulfide
-  losses. Other coordinate-based terms use detached coordinates. Start with K = 1 when enabling this path.
-- `--disulfide_sds_scale S`: with S > 0, applies geometry terms to denoiser estimates of the sampled structure at additional noise
-  levels. This branch is disabled by default; details are in `docs/PARAMETERS.md`.
-- `--disulfide_grad_steps 0` does not disable the distogram-loss gradient.
+The default input settings are `--loop_fix_cys true`, `--pre_drop_bonds true` and `--loop_profile token`. The optimization budget
+is 30 pre-run, 80 soft, 45 temperature and 5 hard iterations, followed by 2 semi-greedy steps.
 
-## Disabling explicit disulfide losses
+CB-CB guidance and optimization losses do not guarantee final SG-SG geometry. Screen generated Holo/Apo structures with
+`scripts/check_disulfide_geometry.py`.
 
-`--use_disulfide_loss false` removes all disulfide-loss terms in every stage: the distogram term, coordinate-based distance,
-worst-pair, angle and dihedral terms, and SDS terms. It also disables geometry gradient steps and SDS diagnostics. The switch
-sets `--disulfide_loss`, `--disulfide_loss_soft`, `--disulfide_loss_temp`, `--disulfide_loss_hard`, `--disulfide_worst_pair_loss`,
-`--disulfide_angle_loss`, `--disulfide_dihedral_loss`, `--disulfide_distogram_loss`, `--disulfide_grad_steps`,
-`--disulfide_sds_scale` and `--debug_sds_profile_every` to 0. Explicitly requesting a nonzero value for one of these options
-with the master switch off is an error.
+## Disabled-loss control
 
-Setting `--disulfide_loss 0` alone does not disable the whole objective: scheduled geometry weights and the distogram term may
-remain active. Use the master switch for a control with no explicit disulfide loss.
+`--use_disulfide_loss false` sets `--disulfide_loss`, `--disulfide_loss_soft`, `--disulfide_loss_temp`, `--disulfide_loss_hard`,
+`--disulfide_worst_pair_loss`, `--disulfide_angle_loss`, `--disulfide_dihedral_loss`, `--disulfide_distogram_loss`,
+`--disulfide_grad_steps`, `--disulfide_sds_scale` and `--debug_sds_profile_every` to zero. An explicitly nonzero value for one of
+these options together with the switch is an error. Setting only `--disulfide_loss 0` is insufficient because stage weights and
+the distogram term may remain active.
 
-The prescribed pairs still fix the Cys positions and supply the bond-input feature. `--loop_fix_cys`, `--pre_drop_bonds` and
-`--loop_profile` keep their values because they control model inputs. The pairing can therefore still influence other objectives.
-The run header prints `disulfide loss OFF` when the master switch is off.
+Prescribed Cys, pairs and input settings remain. Compare the two settings using the same target, checkpoint, seed and
+optimization budget to measure the contribution of the explicit loss terms. The pairing can still influence other objectives
+through input conditioning in the disabled setting.
 
-## Optional input/loss preset
+## Commands and diagnostics
 
-`--rc3_defaults true` selects the following preset. Explicit command-line options override preset values regardless of argument
-order. Other options keep their values.
-
-| Option | Preset value |
-|---|---|
-| `--disulfide_distogram_loss` | `0.0` |
-| `--disulfide_distogram_form` | `prob` |
-| `--loop_fix_cys` | `false` |
-| `--pre_drop_bonds` | `false` |
-| `--loop_profile` | `mean` |
-
-This preset keeps the coordinate-based losses. With `--disulfide_grad_steps 0 --disulfide_sds_scale 0`, those terms enter the
-reported total but contribute no sequence gradient. Use `--use_disulfide_loss false` to remove them as well.
-
-## Commands, diagnostics and plots
-
-- `examples/run_highss_disulfide_modes.sh` runs one MDM2 example in the selected mode: `none`, `default`, `geometry`, `both` or
-  `preset`. The main README gives the complete options and environment overrides.
-- `--debug_grad_norm` reports the combined gradient of active `disulfide*` terms. To compare K = 0 and K = 1 for the geometry path,
-  set `--disulfide_distogram_loss 0 --disulfide_sds_scale 0` in both runs.
-- `--loop_drop_bonds` and `--debug_sds_profile_every` support input and gradient diagnostics; both are disabled by default.
+- `bash examples/run_highss_disulfide_modes.sh on` runs one MDM2 example with disulfide loss enabled.
+- `bash examples/run_highss_disulfide_modes.sh off` runs the same setup without explicit disulfide loss. Omitting the argument
+  selects `on`. Checkpoint, CCD path, GPU, seed, sample count and output settings can be supplied through environment variables.
+- The run header reports the loss and geometry-backpropagation status. `--debug_grad_norm` reports the combined gradient of all
+  active disulfide terms; it does not isolate individual geometry components.
+- Individual weights, diffusion-gradient depth, the optional input/loss preset and auxiliary denoiser-estimate terms are advanced
+  settings in `docs/PARAMETERS.md`. Auxiliary terms and their profiling diagnostics are disabled by default.
 - `--seed` controls random draws; without it, a run is unseeded. `--set_train` defaults to `true`.
-- The run header prints effective input/loss settings. Epoch logs include `sg_sg:` distances, with `[seed]` and `[loop_seq]` entries.
+- Epoch logs include `sg_sg:` distances, with `[seed]` and `[loop_seq]` entries.
 - `scripts/plot_loss_trajectory.py` plots total loss, weighted components, raw terms, SG-SG distances and semi-greedy iPTM from a
   design log. Example logs and figures are in `examples/loss_trajectory/`.
 

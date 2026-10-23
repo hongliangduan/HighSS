@@ -231,59 +231,50 @@ dihedral |target|/tolerance:     90° / 45°
 angle/dihedral loss weights:     0.0005 / 0.0002
 ```
 
-These coordinate-based terms are computed from sampled structures. With the defaults `--disulfide_grad_steps 0` and
-`--disulfide_sds_scale 0`, they enter the reported total but contribute no gradient to the sequence logits. Direct geometry
-backpropagation is enabled with `--disulfide_grad_steps K` for `K >= 1`; the optional SDS branch is another geometry-gradient
-route. Final Holo and Apo structures still require geometric screening.
+Disulfide loss is enabled by default. The standard objective includes the distogram pairing term and the coordinate-based
+SG-SG distance, worst-pair, angle and dihedral terms. The distogram term is differentiable through the model trunk; the geometry
+terms backpropagate through the final denoising step to the sequence logits. Earlier diffusion steps do not retain a gradient graph.
+Geometry terms are evaluated during stages that sample coordinates. Final Holo and Apo structures require geometric screening.
 
-The prescribed pairing reaches the sequence logits through the distogram of the model. The defaults are `--disulfide_distogram_loss 4.0`, `--disulfide_distogram_form nll`, `--loop_fix_cys true`, `--pre_drop_bonds true` and `--loop_profile token`; they are described in `docs/PARAMETERS.md` (section 11) and `RELEASE_NOTES.md`.
+The default input and distogram settings are `--disulfide_distogram_loss 4.0`, `--disulfide_distogram_form nll`,
+`--loop_fix_cys true`, `--pre_drop_bonds true` and `--loop_profile token`. Their details are in `docs/PARAMETERS.md`.
 
-`--use_disulfide_loss` (default `true`) is the master switch of the disulfide loss. With `--use_disulfide_loss false` no
-disulfide loss term exists in any stage: the distogram term and the structure terms above are all set to 0. See
-`docs/PARAMETERS.md`, section 11.
+### Enable or disable disulfide loss
 
-### Choosing a disulfide-loss mode
+`--use_disulfide_loss` (default `true`) is the master switch. Append one of the following settings to a normal `highss` command:
 
-The table below gives the options to append to a normal `highss` command. Each mode uses the same target, checkpoint and
-optimization budget unless those arguments are changed explicitly.
-
-| Mode | Options | Explicit disulfide-loss gradient to sequence logits |
+| Setting | Command option | Effect |
 |---|---|---|
-| No disulfide loss | `--use_disulfide_loss false` | None; both the distogram and coordinate-based loss terms are removed |
-| Default | `--use_disulfide_loss true --disulfide_distogram_loss 4 --disulfide_distogram_form nll --disulfide_grad_steps 0 --disulfide_sds_scale 0` | Distogram pairing term |
-| Geometry only, K = 1 | `--use_disulfide_loss true --disulfide_distogram_loss 0 --disulfide_grad_steps 1 --disulfide_sds_scale 0` | Coordinate-based geometry terms through the final denoising step |
-| Distogram + geometry, K = 1 | `--use_disulfide_loss true --disulfide_distogram_loss 4 --disulfide_distogram_form nll --disulfide_grad_steps 1 --disulfide_sds_scale 0` | Both routes |
-| Optional input/loss preset | `--rc3_defaults true --disulfide_grad_steps 0 --disulfide_sds_scale 0` | None from the explicit disulfide losses; coordinate-based terms remain in the reported total |
+| Enabled (default) | `--use_disulfide_loss true` | Enables the standard disulfide objective, including distogram and geometry backpropagation |
+| Disabled | `--use_disulfide_loss false` | Removes every explicit disulfide-loss term and disables geometry backpropagation |
 
-`--disulfide_pairs` remains required in every mode. Disabling the loss keeps the prescribed Cys and bond-input settings, so
-the pairing can still affect the model and the other loss terms through input conditioning. The optional preset sets
-`loop_fix_cys false`, `pre_drop_bonds false` and `loop_profile mean`, and disables the distogram pairing term.
+The enabled setting is used when this option is omitted. No separate geometry-backpropagation option is needed for a standard run.
 
-Setting `--disulfide_loss 0` alone does not disable the entire disulfide objective: scheduled stage weights and the distogram
-term may remain active. Setting `--disulfide_grad_steps 0` alone disables the direct sampler gradient but leaves the default
-distogram-gradient route active. `--use_disulfide_loss false` rejects explicitly requested nonzero disulfide-loss weights or
-gradient routes.
+For a loss ablation, keep the target, checkpoint, pairing, seed, input settings and optimization budget the same and change only
+this switch. Disabling the loss preserves the prescribed Cys and the bond-input settings: the pairing can still affect the model
+and other objectives through input conditioning. This control measures the contribution of the explicit loss terms.
 
-For a runnable MDM2 example, select one mode per invocation:
+Setting `--disulfide_loss 0` alone is insufficient because scheduled stage weights and the distogram term may remain active.
+The master switch removes all of them and rejects explicitly requested nonzero disulfide-loss weights or gradient routes.
+
+For a runnable MDM2 example, select one setting per invocation:
 
 ```bash
-bash examples/run_highss_disulfide_modes.sh none
-bash examples/run_highss_disulfide_modes.sh default
-bash examples/run_highss_disulfide_modes.sh geometry
-bash examples/run_highss_disulfide_modes.sh both
-bash examples/run_highss_disulfide_modes.sh preset
+bash examples/run_highss_disulfide_modes.sh on
+bash examples/run_highss_disulfide_modes.sh off
 ```
 
-Each invocation generates one 18-residue MDM2 binder with pairs `2-17,6-13`, seed 1 and the full default optimization budget.
-Set `CHECKPOINT`, `CCD_PATH`, `GPU_ID`, `DESIGN_SAMPLES`, `SEED`, `WORK_DIR` or `SUFFIX` as needed, for example:
+Omitting the argument selects `on`. Each invocation generates one 18-residue MDM2 binder with pairs `2-17,6-13`, seed 1 and the
+full default optimization budget. Set `CHECKPOINT`, `CCD_PATH`, `GPU_ID`, `DESIGN_SAMPLES`, `SEED`, `WORK_DIR` or `SUFFIX` as needed:
 
 ```bash
 GPU_ID=3 CHECKPOINT=/path/to/com-FT.ckpt CCD_PATH=/path/to/ccd.pkl \
-  bash examples/run_highss_disulfide_modes.sh geometry
+  bash examples/run_highss_disulfide_modes.sh on
 ```
 
-`--debug_grad_norm true` reports the combined gradient of all active `disulfide*` terms. For a K = 0 versus K = 1 geometry-gradient
-check, set `--disulfide_distogram_loss 0 --disulfide_sds_scale 0` in both runs and keep the remaining settings the same.
+The run header reports whether disulfide loss and geometry backpropagation are enabled. `--debug_grad_norm true` reports the
+combined gradient of all active disulfide terms. Individual weights and gradient settings are advanced options described in the
+parameter reference; they are unnecessary for the standard enabled/disabled comparison.
 
 ## Outputs
 
@@ -375,7 +366,7 @@ For each run, record:
 - binder length and disulfide topology;
 - MSA mode;
 - random seeds, when applicable;
-- optimization settings, including whether `--rc3_defaults true` or `--use_disulfide_loss false` was used; and
+- optimization settings, including `--use_disulfide_loss` and any advanced overrides; and
 - GPU, PyTorch, and CUDA versions.
 
 ## License and bundled runtime
