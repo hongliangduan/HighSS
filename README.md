@@ -52,7 +52,7 @@ HighSS does not include ProteinMPNN, LigandMPNN, Rosetta, AlphaFold3, or Chai-ba
 
 ## Requirements
 
-The provided setup script creates a Python 3.10 conda environment and installs the CUDA 12.8 PyTorch build used for the validated release.
+The provided setup script creates a Python 3.10 conda environment and installs the CUDA 12.8 PyTorch build.
 
 Required external files are not included in the source archive:
 
@@ -163,7 +163,7 @@ learning_rate:       0.1
 
 These defaults should be treated as the baseline. A `1/1/1/1` run with zero semi-greedy steps is only a software smoke test and is not a meaningful design run.
 
-A complete explanation of every command-line parameter, default value, tuning direction, and RC3 limitation is provided in:
+A complete explanation of every command-line parameter, default value, tuning direction, and implementation limitation is provided in:
 
 ```text
 docs/PARAMETERS.md
@@ -215,7 +215,7 @@ Target residue numbering is taken from the supplied PDB.
 
 ## Disulfide objective
 
-The disulfide settings validated in RC3 (unchanged in v0.2.0) are:
+The default coordinate-based disulfide settings are:
 
 ```text
 distance mode:                   bounded
@@ -236,11 +236,11 @@ These coordinate-based terms are computed from sampled structures. With the defa
 backpropagation is enabled with `--disulfide_grad_steps K` for `K >= 1`; the optional SDS branch is another geometry-gradient
 route. Final Holo and Apo structures still require geometric screening.
 
-Since v0.2.0 the prescribed pairing also reaches the sequence logits through the distogram of the model. The defaults are `--disulfide_distogram_loss 4.0`, `--disulfide_distogram_form nll`, `--loop_fix_cys true`, `--pre_drop_bonds true` and `--loop_profile token`; they are described in `docs/PARAMETERS.md` (section 11) and `RELEASE_NOTES.md`. Add `--rc3_defaults true` to reproduce RC3 designs.
+The prescribed pairing reaches the sequence logits through the distogram of the model. The defaults are `--disulfide_distogram_loss 4.0`, `--disulfide_distogram_form nll`, `--loop_fix_cys true`, `--pre_drop_bonds true` and `--loop_profile token`; they are described in `docs/PARAMETERS.md` (section 11) and `RELEASE_NOTES.md`.
 
 `--use_disulfide_loss` (default `true`) is the master switch of the disulfide loss. With `--use_disulfide_loss false` no
-disulfide loss term exists in any stage: the distogram term and the structure terms above are all set to 0. This is not the RC3
-behaviour, which had the structure terms; see `docs/PARAMETERS.md`, section 11.
+disulfide loss term exists in any stage: the distogram term and the structure terms above are all set to 0. See
+`docs/PARAMETERS.md`, section 11.
 
 ### Choosing a disulfide-loss mode
 
@@ -250,14 +250,14 @@ optimization budget unless those arguments are changed explicitly.
 | Mode | Options | Explicit disulfide-loss gradient to sequence logits |
 |---|---|---|
 | No disulfide loss | `--use_disulfide_loss false` | None; both the distogram and coordinate-based loss terms are removed |
-| v0.2.1 default | `--use_disulfide_loss true --disulfide_distogram_loss 4 --disulfide_distogram_form nll --disulfide_grad_steps 0 --disulfide_sds_scale 0` | Distogram pairing term |
+| Default | `--use_disulfide_loss true --disulfide_distogram_loss 4 --disulfide_distogram_form nll --disulfide_grad_steps 0 --disulfide_sds_scale 0` | Distogram pairing term |
 | Geometry only, K = 1 | `--use_disulfide_loss true --disulfide_distogram_loss 0 --disulfide_grad_steps 1 --disulfide_sds_scale 0` | Coordinate-based geometry terms through the final denoising step |
 | Distogram + geometry, K = 1 | `--use_disulfide_loss true --disulfide_distogram_loss 4 --disulfide_distogram_form nll --disulfide_grad_steps 1 --disulfide_sds_scale 0` | Both routes |
-| RC3-compatible loop | `--rc3_defaults true --disulfide_grad_steps 0 --disulfide_sds_scale 0` | None from the explicit disulfide losses; the RC3 coordinate-based terms remain in the reported total |
+| Optional input/loss preset | `--rc3_defaults true --disulfide_grad_steps 0 --disulfide_sds_scale 0` | None from the explicit disulfide losses; coordinate-based terms remain in the reported total |
 
 `--disulfide_pairs` remains required in every mode. Disabling the loss keeps the prescribed Cys and bond-input settings, so
-the pairing can still affect the model and the other loss terms through input conditioning. RC3-compatible mode also restores
-the RC3 feature settings: `loop_fix_cys false`, `pre_drop_bonds false` and `loop_profile mean`.
+the pairing can still affect the model and the other loss terms through input conditioning. The optional preset sets
+`loop_fix_cys false`, `pre_drop_bonds false` and `loop_profile mean`, and disables the distogram pairing term.
 
 Setting `--disulfide_loss 0` alone does not disable the entire disulfide objective: scheduled stage weights and the distogram
 term may remain active. Setting `--disulfide_grad_steps 0` alone disables the direct sampler gradient but leaves the default
@@ -271,7 +271,7 @@ bash examples/run_highss_disulfide_modes.sh none
 bash examples/run_highss_disulfide_modes.sh default
 bash examples/run_highss_disulfide_modes.sh geometry
 bash examples/run_highss_disulfide_modes.sh both
-bash examples/run_highss_disulfide_modes.sh rc3
+bash examples/run_highss_disulfide_modes.sh preset
 ```
 
 Each invocation generates one 18-residue MDM2 binder with pairs `2-17,6-13`, seed 1 and the full default optimization budget.
@@ -366,9 +366,9 @@ The tests use toy tensors and stubbed models; they need neither a checkpoint nor
 
 ## Reproducibility
 
-For each release, record:
+For each run, record:
 
-- the HighSS version;
+- the HighSS source commit or source-archive SHA256;
 - the model-checkpoint SHA256;
 - the `ccd.pkl` SHA256;
 - the target PDB and selected chains;
