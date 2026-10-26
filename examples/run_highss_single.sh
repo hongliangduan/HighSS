@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# No-MSA example; the command-line default uses target-only MSA.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,4 +20,4 @@ highss \
   --ccd_path "$CCD_PATH" \
   --gpu_id "$GPU_ID" \
   --design_samples 32 \
-  --suffix mdm2_18aa_2ss
+  --suffix mdm2_18aa_2ss_no_msa
