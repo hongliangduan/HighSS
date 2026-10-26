@@ -451,8 +451,12 @@ class AtomDiffusion(Module):
         num_sampling_steps=None,
         multiplicity=1,
         train_accumulate_token_repr=False,
+        grad_last_steps=0,
         **network_condition_kwargs,
     ):
+        # grad_last_steps > 0: keep the autograd graph through the last K denoising
+        # steps (default 0 = original behaviour, fully under no_grad). Earlier steps
+        # always run under no_grad, so memory grows with K only.
         num_sampling_steps = default(num_sampling_steps, self.num_sampling_steps)
     
         atom_mask = atom_mask.repeat_interleave(multiplicity, 0)
@@ -474,7 +478,9 @@ class AtomDiffusion(Module):
         token_a = None
 
         # gradually denoise
-        for sigma_tm, sigma_t, gamma in sigmas_and_gammas:
+        n_steps = len(sigmas_and_gammas)
+        for step_idx, (sigma_tm, sigma_t, gamma) in enumerate(sigmas_and_gammas):
+            use_grad = grad_last_steps > 0 and step_idx >= n_steps - grad_last_steps
 
             atom_coords, atom_coords_denoised = center_random_augmentation(
                 atom_coords,
@@ -494,17 +500,31 @@ class AtomDiffusion(Module):
             )
             atom_coords_noisy = atom_coords + eps
 
-            with torch.no_grad():
+            if use_grad:
+                # Recompute the conditioning with the graph attached: the inference
+                # cache was filled under no_grad, so it must not be reused here.
                 atom_coords_denoised, token_a = self.preconditioned_network_forward(
                     atom_coords_noisy,
                     t_hat,
                     training=False,
                     network_condition_kwargs=dict(
                         multiplicity=multiplicity,
-                        model_cache=model_cache,
+                        model_cache=None,
                         **network_condition_kwargs,
                     ),
                 )
+            else:
+                with torch.no_grad():
+                    atom_coords_denoised, token_a = self.preconditioned_network_forward(
+                        atom_coords_noisy,
+                        t_hat,
+                        training=False,
+                        network_condition_kwargs=dict(
+                            multiplicity=multiplicity,
+                            model_cache=model_cache,
+                            **network_condition_kwargs,
+                        ),
+                    )
 
             if self.accumulate_token_repr:
                 if token_repr is None:
@@ -521,10 +541,12 @@ class AtomDiffusion(Module):
                     )
 
             if self.alignment_reverse_diff:
-                with torch.autocast("cuda", enabled=False):
+                # The rigid alignment (SVD) is treated as a constant; gradients flow
+                # through the denoised coordinates only.
+                with torch.autocast("cuda", enabled=False), torch.set_grad_enabled(False):
                     atom_coords_noisy = weighted_rigid_align(
-                        atom_coords_noisy.float(),
-                        atom_coords_denoised.float(),
+                        atom_coords_noisy.detach().float(),
+                        atom_coords_denoised.detach().float(),
                         atom_mask.float(),
                         atom_mask.float(),
                     )
@@ -540,6 +562,43 @@ class AtomDiffusion(Module):
             atom_coords = atom_coords_next
 
         return dict(sample_atom_coords=atom_coords, diff_token_repr=token_repr)
+
+    def denoise_grad(
+        self,
+        atom_coords,
+        t_hats,
+        multiplicity=1,
+        **network_condition_kwargs,
+    ):
+        """One-step denoiser estimates around a fixed structure, with the autograd graph attached.
+
+        `atom_coords` (e.g. the sampled coordinates) is detached, re-noised to every noise level t in
+        `t_hats` (Angstrom) and passed once through the preconditioned denoiser WITH autograd (the
+        conditioning is recomputed, the inference cache is not used). Returns a list with one denoised
+        estimate per level, shaped like `atom_coords`.
+
+        Why: denoised = c_skip(t) x_t + c_out(t) F and c_out(t) ~ t for t << sigma_data. The last sampling
+        step (t = 0.0064 A) moves atoms by at most ~0.01 A per unit of network output, so
+        sample(grad_last_steps=K) with small K hands the sequence almost no geometry gradient; at t of a
+        few Angstrom the same quantity responds at the Angstrom scale.
+        """
+        x0 = atom_coords.detach()
+        outs = []
+        for t in t_hats:
+            t = float(t)
+            noisy = x0 + t * torch.randn_like(x0)
+            denoised, _ = self.preconditioned_network_forward(
+                noisy,
+                t,
+                training=False,
+                network_condition_kwargs=dict(
+                    multiplicity=multiplicity,
+                    model_cache=None,
+                    **network_condition_kwargs,
+                ),
+            )
+            outs.append(denoised)
+        return outs
 
     def loss_weight(self, sigma):
         return (sigma**2 + self.sigma_data**2) / ((sigma * self.sigma_data) ** 2)

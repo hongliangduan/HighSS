@@ -36,6 +36,19 @@ from boltz.model.modules.trunk import (
 from boltz.model.modules.utils import ExponentialMovingAverage
 from boltz.model.optim.scheduler import AlphaFoldLRScheduler
 
+def _sds_noise_levels(n, lo, hi):
+    """n noise levels (Angstrom) in [lo, hi]: one uniform draw inside each of n equal slices of log(t)."""
+    import math
+
+    if n <= 0:
+        return []
+    lo, hi = float(lo), float(hi)
+    if not 0.0 < lo <= hi:
+        raise ValueError(f"need 0 < sigma_lo <= sigma_hi, got {lo}, {hi}")
+    a, b = math.log(lo), math.log(hi)
+    return [math.exp(a + (b - a) * (k + random.random()) / n) for k in range(n)]
+
+
 class Boltz1(LightningModule):
     def __init__(  # noqa: PLR0915, C901, PLR0912
         self,
@@ -320,6 +333,10 @@ class Boltz1(LightningModule):
         run_confidence_sequentially: bool = False,
         disconnect_feats: bool = False,
         disconnect_pairformer: bool = False,
+        structure_grad_steps: int = 0,
+        structure_sds_samples: int = 0,
+        structure_sds_sigma: tuple = (1.5, 6.0),
+        structure_sds_profile: tuple = (),
     ) -> dict[str, Tensor]:
         dict_out = {}
 
@@ -378,12 +395,45 @@ class Boltz1(LightningModule):
             atom_mask=feats["atom_pad_mask"],
             multiplicity=diffusion_samples,
             train_accumulate_token_repr=self.training,
+            grad_last_steps=structure_grad_steps,
         )
         # Detach structure outputs but not the inputs
         dict_out.update({
             k: v.detach() if isinstance(v, torch.Tensor) else v 
             for k, v in structure_out.items()
         })
+        if structure_grad_steps > 0:
+            # Graph-attached coordinates, used only by the disulfide geometry loss.
+            # 'sample_atom_coords' stays detached so every other term is unchanged.
+            dict_out['sample_atom_coords_grad'] = structure_out['sample_atom_coords']
+
+        if structure_sds_samples > 0:
+            # Graph-attached one-step denoiser estimates around the (detached) sampled structure, used only
+            # by the disulfide geometry loss (AtomDiffusion.denoise_grad). Every other term is unchanged.
+            dict_out['denoised_atom_coords_grad'] = self.structure_module.denoise_grad(
+                structure_out['sample_atom_coords'],
+                _sds_noise_levels(structure_sds_samples, *structure_sds_sigma),
+                multiplicity=diffusion_samples,
+                s_trunk=s,
+                z_trunk=z,
+                s_inputs=s_inputs,
+                feats=feats,
+                relative_position_encoding=relative_position_encoding,
+            )
+
+        if structure_sds_profile:
+            # Diagnostic (design_engine --debug_sds_profile_every): graph-attached denoiser estimates at fixed noise levels.
+            _prof_ts = [float(t) for t in structure_sds_profile]
+            dict_out['sds_profile'] = list(zip(_prof_ts, self.structure_module.denoise_grad(
+                structure_out['sample_atom_coords'],
+                _prof_ts,
+                multiplicity=diffusion_samples,
+                s_trunk=s,
+                z_trunk=z,
+                s_inputs=s_inputs,
+                feats=feats,
+                relative_position_encoding=relative_position_encoding,
+            )))
 
         if disconnect_feats:
             feats_ = {k: v.detach() if isinstance(v, torch.Tensor) else v for k, v in feats.items()}
