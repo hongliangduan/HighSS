@@ -1,21 +1,16 @@
-# HighSS
+# HighSS 666666
 
 **HighSS** is a research software package for de novo design of protein and peptide binders with:
 
 - an exact user-defined binder length;
 - fixed cysteine positions;
 - a programmable intramolecular disulfide-pairing topology;
-- optional target-only multiple-sequence alignments; and
+- target-only multiple-sequence alignments enabled by default; and
 - automatic complex (Holo) and binder-only (Apo) structure prediction.
-
-## Associated manuscript
-
-**Programmable disulfide topology enables de novo design of multi-disulfide peptide binders**
-
 
 ## Overview
 
-HighSS accepts a protein target structure and a set of 1-based cysteine pairs. It constructs a binder of the requested length, fixes the specified positions to cysteine, applies geometry-aware disulfide objectives during sequence optimization, and automatically performs final Holo and Apo predictions.
+HighSS accepts a protein target structure and cysteine pairs specified by residue positions within the binder. It constructs a binder of the requested length, fixes the specified positions to cysteine, applies geometry-aware disulfide objectives during sequence optimization, and automatically performs final Holo and Apo predictions.
 
 For example:
 
@@ -52,7 +47,8 @@ HighSS currently supports:
 
 The provided setup script creates a Python 3.10 conda environment and installs the CUDA 12.8 PyTorch build.
 
-Required external files are not included in the source archive:
+Required external files are not included in the source archive. They are available through Figshare
+(<https://doi.org/10.6084/m9.figshare.33069275>) and are placed as follows:
 
 ```text
 checkpoints/com-FT.ckpt
@@ -61,7 +57,7 @@ checkpoints/ccd.pkl
 
 `boltz1_conf.ckpt` is not required.
 
-For target-only MSA mode, the machine must be able to access the ColabFold/MMseqs2 MSA service.
+The default `--msa_mode target` requires access to the ColabFold/MMseqs2 MSA service. `--msa_mode none` runs without contacting that service.
 
 ## Installation
 
@@ -73,7 +69,7 @@ chmod +x setup.sh
 conda activate highss
 ```
 
-The installer pins the validated CUDA 12.8 PyTorch build and then installs
+The installer pins the CUDA 12.8 PyTorch build and then installs
 the declared dependencies of both HighSS and the vendored Boltz runtime.
 A fresh installation downloads several large CUDA wheels and may take time.
 
@@ -90,7 +86,7 @@ highss --help
 
 ## Quick start
 
-### No-MSA design
+Target-only MSA and disulfide-loss backpropagation are enabled by default:
 
 ```bash
 highss \
@@ -99,7 +95,6 @@ highss \
   --target_name mdm2 \
   --binder_length 18 \
   --disulfide_pairs "2-17,6-13" \
-  --msa_mode none \
   --checkpoint checkpoints/com-FT.ckpt \
   --ccd_path checkpoints/ccd.pkl \
   --gpu_id 0 \
@@ -107,25 +102,11 @@ highss \
   --suffix mdm2_18aa_2ss
 ```
 
-### Target-only MSA design
+MSA is generated only for the target chains; the designed binder remains single-sequence. `--msa_mode target` selects this
+setting explicitly. Use `--msa_mode none` to disable MSA generation.
 
-```bash
-highss \
-  --target_pdb examples/mdm2/mdm2_pro.pdb \
-  --target_chains A \
-  --target_name mdm2 \
-  --binder_length 25 \
-  --disulfide_pairs "2-25,6-21,10-16" \
-  --msa_mode target \
-  --msa_max_seqs 4096 \
-  --checkpoint checkpoints/com-FT.ckpt \
-  --ccd_path checkpoints/ccd.pkl \
-  --gpu_id 0 \
-  --design_samples 32 \
-  --suffix mdm2_25aa_3ss_target_msa
-```
-
-In target-only MSA mode, the designed binder remains single-sequence and only the target chain receives an MSA.
+Runnable examples are provided for [no-MSA design](examples/run_highss_single.sh) and
+[target-only MSA design](examples/run_highss_target_msa.sh).
 
 ## Essential design parameters
 
@@ -136,16 +117,16 @@ The parameters most users should set are:
 | `--target_pdb` | Local target PDB file | Required |
 | `--target_chains` | Target chains to retain, such as `A` or `A,B` | Required |
 | `--binder_length` | Exact number of residues in the designed binder | Required |
-| `--disulfide_pairs` | 1-based cysteine pairing topology | Required |
-| `--msa_mode` | `none` or target-only `target` MSA | Start with `none`; use `target` when target MSA information is desired |
-| `--design_samples` | Number of independent designs | Use multiple samples; 32 is a practical initial batch |
+| `--disulfide_pairs` | Paired Cys positions within the designed binder; the first residue is numbered 1 | Required |
+| `--msa_mode` | Target-only MSA or no MSA | Default `target`; use `none` to disable MSA |
+| `--design_samples` | Number of independent designs | Set the number of designs to generate |
 | `--gpu_id` | Physical GPU selected through `CUDA_VISIBLE_DEVICES` | Select one available GPU |
 | `--checkpoint` | HighSS model checkpoint | Point to the supplied custom checkpoint |
 | `--ccd_path` | Local CCD dictionary | Point to `ccd.pkl` |
 | `--suffix` | Name appended to the output run | Use a unique, informative label |
 | `--redo_boltz_predict` | Automatically run final Holo and Apo predictions | Keep `true` for normal use |
 
-The validated optimization schedule is:
+The default optimization settings are:
 
 ```text
 pre_iteration:       30
@@ -159,17 +140,11 @@ learning_rate_pre:   1.0
 learning_rate:       0.1
 ```
 
-These defaults should be treated as the baseline. A `1/1/1/1` run with zero semi-greedy steps is only a software smoke test and is not a meaningful design run.
-
-A complete explanation of every command-line parameter, default value, tuning direction, and implementation limitation is provided in:
-
-```text
-docs/PARAMETERS.md
-```
+Parameter descriptions and default values are provided in [USAGE.md](USAGE.md) and [docs/PARAMETERS.md](docs/PARAMETERS.md).
 
 ## Disulfide topology format
 
-`--disulfide_pairs` uses **1-based binder residue positions**.
+`--disulfide_pairs` specifies residue positions within the designed binder. **The first residue is numbered 1.**
 
 Examples:
 
@@ -203,13 +178,16 @@ To bias design toward specified target residues:
 ```bash
 highss \
   ... \
-  --contact_residues "24,27,31,54" \
+  --contact_residues "54,58,61,67" \
   --contact_target_chain A
 ```
 
 For a single-chain target, `--contact_target_chain` may be omitted. For a multi-chain target, it is required whenever `--contact_residues` is used.
 
-Target residue numbering is taken from the supplied PDB.
+Residues are given by the residue numbers of the supplied PDB file, not by their position in the chain: `examples/mdm2/mdm2_pro.pdb`
+numbers its residues 25–109, so `54` is Leu54. An insertion code is appended to the number, for example `52A`. HighSS converts the
+numbers to positions in the target sequence before it writes the constraint, prints the conversion in the run header, and stops with
+an error if a number is not a standard residue of the chain.
 
 ## Disulfide objective
 
@@ -229,10 +207,10 @@ dihedral |target|/tolerance:     90° / 45°
 angle/dihedral loss weights:     0.0005 / 0.0002
 ```
 
-Disulfide loss is enabled by default. The standard objective includes the distogram pairing term and the coordinate-based
-SG-SG distance, worst-pair, angle and dihedral terms. The distogram term is differentiable through the model trunk; the geometry
-terms backpropagate through the final denoising step to the sequence logits. Earlier diffusion steps do not retain a gradient graph.
-Geometry terms are evaluated during stages that sample coordinates. Final Holo and Apo structures require geometric screening.
+Disulfide loss and its backpropagation are enabled by default. The loss includes a distogram pairing term, which is
+backpropagated to the sequence logits, and coordinate-based SG-SG distance, worst-pair, angle and dihedral terms, which are
+evaluated during stages that sample coordinates and enter the logged total; they carry a sequence gradient only when
+`--disulfide_grad_steps` is greater than 0 (default 0).
 
 The default input and distogram settings are `--disulfide_distogram_loss 4.0`, `--disulfide_distogram_form nll`,
 `--loop_fix_cys true`, `--pre_drop_bonds true` and `--loop_profile token`. Their details are in `docs/PARAMETERS.md`.
@@ -243,17 +221,15 @@ The default input and distogram settings are `--disulfide_distogram_loss 4.0`, `
 
 | Setting | Command option | Effect |
 |---|---|---|
-| Enabled (default) | `--use_disulfide_loss true` | Enables the standard disulfide objective, including distogram and geometry backpropagation |
-| Disabled | `--use_disulfide_loss false` | Removes every explicit disulfide-loss term and disables geometry backpropagation |
+| Enabled (default) | `--use_disulfide_loss true` | Enables the disulfide loss; the distogram term is backpropagated to the sequence logits |
+| Disabled | `--use_disulfide_loss false` | Removes every explicit disulfide-loss term and its backpropagation |
 
-The enabled setting is used when this option is omitted. No separate geometry-backpropagation option is needed for a standard run.
+The enabled setting is used when this option is omitted.
 
-For a loss ablation, keep the target, checkpoint, pairing, seed, input settings and optimization budget the same and change only
-this switch. Disabling the loss preserves the prescribed Cys and the bond-input settings: the pairing can still affect the model
-and other objectives through input conditioning. This control measures the contribution of the explicit loss terms.
+Disabling the loss preserves the prescribed Cys positions and bond-input settings.
 
 Setting `--disulfide_loss 0` alone is insufficient because scheduled stage weights and the distogram term may remain active.
-The master switch removes all of them and rejects explicitly requested nonzero disulfide-loss weights or gradient routes.
+The master switch removes the disulfide-loss terms. Conflicting nonzero loss settings are rejected.
 
 For a runnable MDM2 example, select one setting per invocation:
 
@@ -263,16 +239,15 @@ bash examples/run_highss_disulfide_modes.sh off
 ```
 
 Omitting the argument selects `on`. Each invocation generates one 18-residue MDM2 binder with pairs `2-17,6-13`, seed 1 and the
-full default optimization budget. Set `CHECKPOINT`, `CCD_PATH`, `GPU_ID`, `DESIGN_SAMPLES`, `SEED`, `WORK_DIR` or `SUFFIX` as needed:
+full default optimization budget, with target-only MSA. Set `CHECKPOINT`, `CCD_PATH`, `GPU_ID`, `MSA_MODE`, `DESIGN_SAMPLES`,
+`SEED`, `WORK_DIR` or `SUFFIX` as needed:
 
 ```bash
 GPU_ID=3 CHECKPOINT=/path/to/com-FT.ckpt CCD_PATH=/path/to/ccd.pkl \
   bash examples/run_highss_disulfide_modes.sh on
 ```
 
-The run header reports whether disulfide loss and geometry backpropagation are enabled. `--debug_grad_norm true` reports the
-combined gradient of all active disulfide terms. Individual weights and gradient settings are advanced options described in the
-parameter reference; they are unnecessary for the standard enabled/disabled comparison.
+The run header reports the loss settings. `--debug_grad_norm true` prints gradient norms during optimization.
 
 ## Outputs
 
@@ -320,7 +295,7 @@ Generate multiple independent samples and rank or filter the resulting designs. 
 
 ## Loss trajectory
 
-`scripts/plot_loss_trajectory.py` draws the loss trajectory of one design from the log of a run: the total loss and its weighted components over the optimization stages, the raw contact, confidence and distogram terms, the SG–SG distances of the prescribed pairs, and the iPTM of the semi-greedy candidates. It writes the figure (PNG and PDF) and a CSV with every plotted value, and prints a summary and a suggested figure legend.
+`scripts/plot_loss_trajectory.py` draws the loss trajectory of one design from the log of a run: the total loss and its weighted components over the optimization stages, the raw contact, helix, confidence and distogram terms, the SG–SG distances of the prescribed pairs in structures sampled during optimization, and the iPTM of the semi-greedy candidates. It writes PNG and PDF figures and a CSV containing per-step loss terms, their weights, logged and reconstructed totals, and SG–SG distances, and prints a summary and a draft figure legend.
 
 ```bash
 PYTHONUNBUFFERED=1 highss ... 2>&1 | tee run.txt
@@ -335,14 +310,11 @@ Reference Boltz-1 fine-tuning scripts and configurations for the
 monomer-fine-tuned (`mon-FT`) and complex-fine-tuned (`com-FT`) models are
 provided in [`training/`](training/README.md).
 
-The released checkpoints and chemical component dictionary are distributed
-separately through Figshare and are not stored in this Git repository.
+The released checkpoints (`mon-FT.ckpt`, `com-FT.ckpt`) and the chemical component dictionary (`ccd.pkl`) are distributed
+separately through Figshare (<https://doi.org/10.6084/m9.figshare.33069275>) and are not stored in this Git repository.
 
-The public configurations document the training workflow and parameters used
-for the associated study. Exact checkpoint reproduction additionally requires
-the original processed inputs, validation splits and study-compatible Boltz
-source revision; these boundaries are documented in
-[`training/PARAMETER_SOURCES.md`](training/PARAMETER_SOURCES.md).
+Training commands, required inputs and configuration paths are described in
+[`training/README.md`](training/README.md).
 
 ## Tests
 
@@ -352,20 +324,6 @@ python -m pytest tests
 ```
 
 The tests use toy tensors and stubbed models; they need neither a checkpoint nor a GPU.
-
-## Reproducibility
-
-For each run, record:
-
-- the HighSS source commit or source-archive SHA256;
-- the model-checkpoint SHA256;
-- the `ccd.pkl` SHA256;
-- the target PDB and selected chains;
-- binder length and disulfide topology;
-- MSA mode;
-- random seeds, when applicable;
-- optimization settings, including `--use_disulfide_loss` and any advanced overrides; and
-- GPU, PyTorch, and CUDA versions.
 
 ## License and bundled runtime
 
