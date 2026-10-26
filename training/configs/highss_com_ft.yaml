@@ -1,6 +1,6 @@
-# HighSS complex fine-tuning configuration, continued sequentially from mon-FT.
-# Values documented in the manuscript are used directly. Values not stated in
-# the manuscript retain the original Boltz/HighSS training-template defaults.
+# HighSS complex fine-tuning reference configuration, continued from mon-FT.
+# Training commands and required inputs:
+# training/README.md and training/data/README.md.
 trainer:
   accelerator: gpu
   devices: 1
@@ -120,7 +120,7 @@ model:
     activation_checkpointing: true
     offload_to_cpu: false
   structure_prediction_training: true
-  confidence_prediction: false  # manuscript: structure module only
+  confidence_prediction: false  # Confidence prediction is disabled in this reference configuration.
   alpha_pae: 1
   confidence_imitate_trunk: true
   confidence_model_args:

@@ -17,6 +17,6 @@ data/complex/processed/msa/
 data/complex/validation_ids.txt
 ```
 
-The exact validation-ID files determine checkpoint selection. They cannot be
-reconstructed from the manuscript text alone and must be supplied from the
-original study records for bitwise reproduction.
+The original validation-ID files are required to reproduce the study's data
+splits and checkpoint-selection protocol. These files are not included in this
+source release and must be supplied from the original training records.

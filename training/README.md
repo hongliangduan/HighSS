@@ -4,9 +4,6 @@ This directory contains the reference Boltz-1 fine-tuning entry point,
 portable monomer and complex configurations, data-processing utilities and
 evaluation scripts associated with HighSS.
 
-Associated manuscript: *Programmable disulfide topology enables de novo design
-of multi-disulfide peptide binders*.
-
 The public inference and design workflow is documented in the repository root.
 Large checkpoints and the chemical component dictionary are distributed
 separately and are intentionally not stored in GitHub.
@@ -26,7 +23,6 @@ training/
 ├── data/README.md
 ├── checkpoints/README.md
 ├── outputs/README.md
-├── PARAMETER_SOURCES.md
 └── SECURITY.md
 ```
 
@@ -76,9 +72,9 @@ python training/train.py training/configs/highss_mon_ft.yaml \
 
 ## Software compatibility
 
-The scripts use the legacy `boltz.model.model.Boltz1` training API. Pin the
-Boltz source version used for the study; a newer upstream release may require
-adaptation.
+The scripts use the `boltz.model.model.Boltz1` training API. Use the Boltz
+source revision associated with the study and verify API compatibility when
+selecting the training runtime.
 
 ## Experiment tracking
 
@@ -86,9 +82,8 @@ Weights & Biases is disabled unless a `wandb` block is enabled. Authenticate
 through the W&B CLI or environment variables. Do not store credentials in
 configuration files.
 
-## Reproducibility boundary
+## Training inputs
 
-These are reference fine-tuning scripts and configurations. Exact checkpoint
-reproduction additionally requires the original validation-ID files, processed
-training inputs and the exact Boltz source revision. Values not explicitly
-reported in the manuscript are identified in `training/PARAMETER_SOURCES.md`.
+Training requires processed structures, MSAs, validation-ID files and a compatible Boltz source/runtime. Supply the local dataset
+paths through the configuration files or dot-list overrides. The source package does not include these datasets or model weights.
+Details of the expected data layout are in `training/data/README.md`.
