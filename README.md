@@ -1,4 +1,4 @@
-# HighSS 666666
+# HighSS
 
 **HighSS** is a research software package for de novo design of protein and peptide binders with:
 
