@@ -1,8 +1,10 @@
 # HighSS parameter reference
 
-This document describes the command-line parameters exposed by HighSS v0.1.1 RC3.
+This guide describes input, output, optimization and loss-weight options for running HighSS.
 
-The defaults listed here are the defaults in `highss/cli.py`. Unless a parameter is explicitly discussed below as a tuning variable, keep the validated default.
+Disulfide loss is enabled by default. `--use_disulfide_loss false` removes every explicit disulfide-loss term (section 11).
+
+The default values are defined in `highss/cli.py`.
 
 ## 1. Target input
 
@@ -36,19 +38,26 @@ Used in output names. It does not change the target structure.
 
 Output chain ID assigned to the designed binder. The target chains are remapped as needed so they do not collide with the binder chain.
 
-Keep `A` unless a downstream workflow requires another chain ID.
+Keep `A` unless a downstream workflow requires another chain ID. The binder is always the first chain of the input YAML and is
+designed as such under any ID; the ID only names it in the YAML and in the predicted structures. The `config.yaml` saved with
+the results lists the binder under the design engine's own key, `A`.
 
 ### `--contact_residues`
 
-- Type: comma-separated target residue numbers
+- Type: comma-separated PDB residue numbers
 - Default: empty
 
-Enables pocket conditioning toward specified residues in the supplied PDB numbering.
+Enables pocket conditioning toward specified residues. Give the residue numbers as they appear in the supplied PDB file (the
+residue-number column of its ATOM records), with the insertion code appended where there is one, for example `52A`.
 
-Example:
+HighSS converts the numbers to 1-based positions in the sequence of the selected chain, writes those positions into the pocket
+constraint and prints the conversion in the run header. A number that is not a standard residue of the chain stops the run before
+the design starts.
+
+Example (`examples/mdm2/mdm2_pro.pdb` numbers its residues 25–109):
 
 ```bash
---contact_residues "24,27,31,54"
+--contact_residues "54,58,61,67"
 ```
 
 This is a conditioning signal, not a guarantee that every listed residue forms a final contact.
@@ -66,7 +75,7 @@ Identifies the chain containing `--contact_residues`.
 ### `--msa_mode`
 
 - Choices: `none`, `target`
-- Default: `none`
+- Default: `target`
 
 `none`:
 - binder MSA is empty;
@@ -76,7 +85,7 @@ Identifies the chain containing `--contact_residues`.
 - binder MSA remains empty;
 - MSA is generated only for target chains.
 
-Use `none` for the simplest and most reproducible local workflow. Use `target` when target evolutionary information is desired and network access to the MSA service is available.
+Target-only MSA is enabled when this option is omitted. The target-MSA mode requires access to the MSA service. Use `none` to disable MSA generation.
 
 ### `--msa_max_seqs`
 
@@ -131,6 +140,9 @@ Pairing order defines topology. For example, `2-17,6-13` and `2-13,6-17` use the
 
 The source package does not include the model file. Provide the custom checkpoint explicitly.
 
+The checkpoint must include the confidence head, because the design loss uses pLDDT, PAE and iPTM. HighSS stops with an error
+if the loaded model has none.
+
 ### `--ccd_path`
 
 - Type: path
@@ -155,7 +167,7 @@ valid. Absolute run directories are still recommended for production jobs.
 - Type: string
 - Default: `run`
 
-Appended to the output version name:
+Appended to the output directory name:
 
 ```text
 highss_<target_name>_<suffix>
@@ -191,7 +203,7 @@ Practical starting point:
 32 samples per topology
 ```
 
-Larger batches improve exploration but scale runtime approximately linearly.
+Each sample generates an independent design.
 
 ### `--redo_boltz_predict`
 
@@ -234,14 +246,15 @@ HighSS uses a warm-up followed by differentiable sequence optimization and optio
 
 Controls optimization of binder residue logits.
 
-The validated baseline uses `SGD`. Changing optimizer changes optimization dynamics and should be treated as an experimental setting.
+Selects the optimizer used for sequence-logit updates.
 
 ### `--pre_iteration`
 
 - Type: integer
 - Default: `30`
 
-Warm-up iterations used to initialize a structural/sequence state before the main design stages.
+Warm-up iterations before the main design stages. The warm-up evaluates the distogram head only (no structure sampling) and uses
+`--learning_rate_pre`.
 
 Reducing this saves time but may give unstable initialization. Increasing it adds cost and has not been established as universally better.
 
@@ -286,11 +299,27 @@ Increasing this parameter adds approximately ten extra model evaluations per ste
 
 Number of model recycling steps used during differentiable design.
 
-The validated HighSS baseline is `1`. Larger values increase compute and memory. Do not assume that more recycling always improves design.
+Number of recycling steps used by the model.
+
+### `--seed`
+
+- Type: integer
+- Default: unset (runs are not seeded)
+
+Seeds Python, NumPy and PyTorch at the start of every design with `seed + <design index>`. The log shows a `[seed]` line for every design. The helix weight, which is drawn at random for every design (`--helix_loss_min`, `--helix_loss_max`), is fixed by the seed as well.
+
+Seeding fixes the random draws of a run. GPU kernels and library versions can still change the numerical results.
+
+### `--set_train`
+
+- Type: boolean
+- Default: `true`
+
+Runs the forward passes of the design loop with the model in train mode (dropout active), which is the original behaviour. `false` uses eval mode, as `boltz predict` does.
 
 ### Production and smoke-test schedules
 
-Validated production baseline:
+Default stage settings:
 
 ```text
 pre_iteration       30
@@ -331,7 +360,7 @@ The smoke-test schedule is not suitable for assessing sequence quality, interfac
 3. temperature-annealing stage;
 4. hard stage.
 
-In RC3, the two soft-stage iteration counts for `3stages_extra` come from `highss/configs/default_protein_config.yaml` and are not exposed as CLI arguments. Use `3stages` unless deliberately benchmarking the extra mode.
+The two soft-stage iteration counts for `3stages_extra` come from `highss/configs/default_protein_config.yaml` and are not exposed as CLI arguments.
 
 ### `--learning_rate_pre`
 
@@ -347,16 +376,17 @@ Learning rate used during warm-up.
 
 Learning rate used during the main optimization stages.
 
-Changing either learning rate can produce instability, early sequence collapse, or insufficient movement. Keep the defaults unless running controlled experiments.
+The pre-run and subsequent stages use their respective learning-rate settings.
 
 ### `--e_soft`
 
 - Type: float
 - Default: `0.8`
 
-Soft-sequence exponent/temperature-control value used by `3stages`.
+Final value of the soft-mixing weight of the soft stage used by `3stages`.
 
-This changes how sharply residue logits are converted into a soft sequence representation. It is an advanced parameter.
+Over the iterations of the soft stage the weight `w` rises linearly from 0 to this value, and the input residue distribution is
+`w * softmax(2 * logits) + (1 - w) * logits`. It is an advanced parameter.
 
 ### `--e_soft_1`
 
@@ -417,7 +447,7 @@ Number of favorable binder intrachain contacts considered by the internal-contac
 
 Uses the binder side as the position-wise basis when selecting interface contacts.
 
-This is the validated setting for HighSS and should normally remain true.
+Enables contact optimization per binder position.
 
 ### `--mask_ligand`
 
@@ -426,7 +456,7 @@ This is the validated setting for HighSS and should normally remain true.
 
 During warm-up, masks non-binder tokens/atoms when enabled.
 
-HighSS is scoped to protein targets; keep this false for the validated protein-binder workflow.
+Set to false for protein targets.
 
 ### `--distogram_only`
 
@@ -435,7 +465,7 @@ HighSS is scoped to protein targets; keep this false for the validated protein-b
 
 When true, optimization uses distogram-only model output and omits confidence, PAE, and coordinate-derived losses during the main design call.
 
-Keep false for normal HighSS design. True is a lower-information experimental mode.
+False uses structure prediction in addition to the distogram. True runs the distogram-only mode.
 
 ### `--helix_loss_min`, `--helix_loss_max`
 
@@ -444,9 +474,10 @@ Keep false for normal HighSS design. True is a lower-information experimental mo
 
 For every design sample, HighSS draws the helix-loss weight uniformly from this interval.
 
-Negative values reward the helix-associated contact pattern used by the internal helix objective; values near zero reduce that bias.
+The helix term is the mean, over residue pairs (i, i+3) of the binder, of -log P(distance < 6 A) taken from the distogram. A negative
+weight penalizes this contact pattern, a positive weight rewards it, and zero removes the term.
 
-For short disulfide-rich peptides, keep the validated interval unless deliberately studying secondary-structure bias.
+The interval specifies the range from which the helix weight is sampled for each design.
 
 ## 7. General loss weights
 
@@ -482,9 +513,8 @@ The total objective is a weighted sum. Increasing a weight makes that term more 
 - Default: `0.0`
 - Meaning: radius-of-gyration objective.
 
-At the RC3 default, radius of gyration is reported but not weighted into optimization. Positive nonzero values are experimental and can over-favor compactness.
+At the default weight of zero, radius of gyration is reported but not weighted into optimization.
 
-Do not tune multiple loss weights simultaneously without recording a controlled comparison.
 
 ## 8. Disulfide distance objective
 
@@ -504,7 +534,7 @@ Do not tune multiple loss weights simultaneously without recording a controlled 
 `bounded`:
 - penalizes values outside `[lower_bound, upper_bound]`;
 - may optionally include a center penalty;
-- validated HighSS mode.
+- default distance mode.
 
 ### `--disulfide_target_dist`
 
@@ -522,7 +552,7 @@ Target SG–SG distance.
 
 Lower edge of the unpenalized interval.
 
-The validated value of zero intentionally avoids adding a short-distance lower-bound penalty during optimization. Final stereochemical screening is still required.
+A value of zero adds no lower-bound penalty for short distances.
 
 ### `--disulfide_upper_bound`
 
@@ -542,7 +572,7 @@ Lowering this value makes the closure objective stricter and may compete more st
 
 Optional weight for pulling in-bound distances toward `disulfide_target_dist`.
 
-The validated value zero treats the interval as a one-sided closure objective rather than a precise bond-length restraint.
+Zero disables the center-distance penalty inside the permitted interval.
 
 ### `--disulfide_hinge_cutoff`
 
@@ -561,7 +591,7 @@ When scheduling is enabled, stage-specific values are derived from the schedule 
 
 Enables stage-dependent disulfide strength and a relaxed-to-strict closure schedule.
 
-Keep true for the validated baseline.
+True enables stage-specific distance-loss weights and cutoffs.
 
 ### `--disulfide_hinge_cutoff_start`
 
@@ -613,7 +643,7 @@ The increasing sequence:
 
 allows early sequence/interface exploration and applies stronger closure pressure after the sequence becomes more discrete.
 
-Raising these values can improve closure pressure but can also damage interface quality, produce optimization instability, or force unrealistic local geometry.
+These values multiply the distance-loss term in the respective stages.
 
 ### `--disulfide_worst_pair_loss`
 
@@ -668,19 +698,116 @@ Absolute target value. Both positive and negative handed dihedrals can satisfy t
 
 Deviation tolerated around the absolute dihedral target.
 
-Angle and dihedral terms are weak guidance terms, not a substitute for final atomic-geometry validation.
+Angle and dihedral targets and tolerances define the corresponding geometry-loss terms.
+
+### `--debug_grad_norm`
+
+- Type: boolean
+- Default: `false`
+
+Prints, in every epoch after the pre-run, the norm of the gradient of the disulfide terms and of all other terms with respect to the
+sequence logits (`NONE` = the term has no autograd graph) and their ratio. Diagnostic; adds backward passes.
 
 ### `--disulfide_filter_cutoff`
 
 - Type: float, Å
 - Default: `2.8`
-- RC3 status: reserved/not active
+- Status: reserved/not active
 
-In RC3 this value is accepted by the CLI and passed through function calls, but it is not used to reject candidates or filter final structures.
+This value is accepted by the CLI and passed through function calls, but it is not used to reject candidates or filter final structures.
 
 Do not assume that setting this option performs automatic final screening. Use `scripts/check_disulfide_geometry.py` on generated CIF files.
 
-## 11. Recommended baseline command
+## 11. Disulfide loss and sequence features
+
+### `--use_disulfide_loss`
+
+- Type: boolean
+- Default: `true`
+
+Master switch for the explicit disulfide objective.
+
+| Setting | Command option | Behavior |
+|---|---|---|
+| Enabled (default) | `--use_disulfide_loss true` | Computes the distogram and geometry loss terms; the distogram term is backpropagated to the binder sequence logits |
+| Disabled | `--use_disulfide_loss false` | Removes all explicit disulfide-loss terms and their backpropagation |
+
+The enabled setting is used when the option is omitted. The disabled setting preserves the prescribed Cys positions and
+bond-input settings. Nonzero overrides for disabled loss terms are rejected.
+
+Use this switch to disable the full objective. `--disulfide_loss 0` alone does not switch the structure terms off when
+stage-specific weights are active, and it does not disable the distogram term.
+
+### Example commands
+
+Run `bash examples/run_highss_disulfide_modes.sh on` with disulfide loss and backpropagation enabled, or
+`bash examples/run_highss_disulfide_modes.sh off` without explicit disulfide loss. The script accepts checkpoint, dictionary,
+GPU, seed, sample-count and output settings through environment variables; see the main README.
+
+### Input settings
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--loop_fix_cys` | `true` | Keep prescribed Cys fixed in the loop sequence features |
+| `--pre_drop_bonds` | `true` | Omit the bond feature during the pre-run only |
+| `--loop_profile` | `token` | Use a per-token binder profile |
+
+### `--disulfide_distogram_loss`
+
+- Type: float
+- Default: `4.0`
+
+Weight of the distogram Cys-Cys term. For every prescribed pair the term takes the distance distribution that the model predicts
+between the two CB atoms (the distogram), adds up the probability of the bins inside the bonding window
+(`--disulfide_distogram_lo` to `--disulfide_distogram_hi`) and takes the negative logarithm of that probability
+(`--disulfide_distogram_form nll`); the loss is the average over the pairs. It is differentiable at every stage, needs no structure
+sampling and is logged every epoch as `disulfide_distogram_loss`.
+
+
+### `--disulfide_distogram_form`
+
+- Type: `nll` or `prob`
+- Default: `nll`
+
+`nll` uses `-log P(window)`. `prob` uses `1 - P(window)`.
+
+### `--disulfide_distogram_lo`, `--disulfide_distogram_hi`
+
+- Type: float, Angstrom
+- Default: `3.3` and `4.8`
+
+Bonding window of the CB-CB distance of a prescribed pair, used by the distogram term. These values describe disulfide geometry; do
+not change them to tune a design.
+
+### `--loop_fix_cys`
+
+- Type: boolean
+- Default: `true`
+
+With true, the prescribed Cys residues are written into the sequence features of every forward pass and are fixed during
+sequence optimization.
+
+### `--pre_drop_bonds`
+
+- Type: boolean
+- Default: `true`
+
+Removes the bond feature from the model input in the pre-run only. The soft, temperature and hard stages, semi-greedy updates
+and final prediction retain the bond feature.
+
+### `--loop_profile`
+
+- Type: `token`, `token_pre` or `mean`
+- Default: `token`
+
+MSA profile feature of the binder tokens inside the design loop. `boltz predict` gives every token the profile of its own residue
+(the mean over the MSA rows of that token; with `--msa_mode none` simply the residue itself). `mean` writes the averaged composition of
+the whole binder into every binder token, so the loop profile differs from that of the final prediction. `token` writes the per-token
+profile in every design stage, `token_pre` in the pre-run only. The profile is an input
+feature; the sequence gradient still flows through the residue type only. With `--msa_mode target` the profile of a binder token is
+the featurizer's own (the mean over all MSA rows of that token).
+
+## 12. Example command
 
 ```bash
 highss \
@@ -729,14 +856,20 @@ highss \
   --save_trajectory false
 ```
 
-## 12. Tuning order
+The command uses the default settings listed in this guide.
 
-When improving a production campaign, change parameters in this order:
+## 13. Additional command-line options
 
-1. increase `design_samples`;
-2. compare topologies and cysteine placements;
-3. inspect final Holo/Apo confidence and disulfide geometry;
-4. only then consider modest changes to disulfide weights or cutoffs;
-5. change learning rates, loss balance, or optimizer only in controlled benchmarks.
-
-Do not judge a parameter change from one candidate. Compare distributions across a sufficiently large matched batch.
+| Option | Default | Function |
+|---|---|---|
+| `--loop_drop_bonds` | `false` | Omit bond features in the sequence-optimization loop. |
+| `--disulfide_grad_steps` | `0` | Number of final denoising steps retaining gradients for geometry loss; `0` computes and logs the geometry terms without a sequence gradient. |
+| `--disulfide_sds_scale` | `0.0` | Weight multiplier for geometry terms evaluated on auxiliary denoiser estimates. |
+| `--disulfide_sds_samples` | `2` | Number of noise levels sampled for auxiliary geometry terms. |
+| `--disulfide_sds_sigma_lo` | `1.5` | Minimum auxiliary noise level, in angstroms. |
+| `--disulfide_sds_sigma_hi` | `6.0` | Maximum auxiliary noise level, in angstroms. |
+| `--disulfide_sds_clip` | `2.0` | Maximum SG-SG upper-bound violation, in angstroms, included in auxiliary distance terms. |
+| `--debug_sds_profile_every` | `0` | Print an auxiliary-gradient profile at the specified epoch interval; zero disables it. |
+| `--debug_sds_profile_t` | `1.5,3,6,12,24,48` | Noise levels used for the auxiliary-gradient profile. |
+| `--rc3_defaults` | `false` | Apply the built-in input/loss configuration; explicit command-line values take precedence. |
+| `--help` | — | Display command-line usage and exit. |
