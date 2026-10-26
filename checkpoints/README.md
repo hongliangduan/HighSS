@@ -1,9 +1,10 @@
 # HighSS checkpoint files
 
-The repository intentionally excludes model binaries.
+The repository intentionally excludes model binaries. The released files are available through Figshare:
+<https://doi.org/10.6084/m9.figshare.33069275>.
 
-Create this directory and place the following external files here before
-running the bundled examples:
+Place the following external files in this directory before running the
+bundled examples:
 
 - `com-FT.ckpt`
 - `ccd.pkl`
