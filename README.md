@@ -47,8 +47,7 @@ HighSS currently supports:
 
 The provided setup script creates a Python 3.10 conda environment and installs the CUDA 12.8 PyTorch build.
 
-Required external files are not included in the source archive. They are available through Figshare
-(<https://doi.org/10.6084/m9.figshare.33069275>) and are placed as follows:
+Required external files are not included in the source archive:
 
 ```text
 checkpoints/com-FT.ckpt
@@ -178,16 +177,13 @@ To bias design toward specified target residues:
 ```bash
 highss \
   ... \
-  --contact_residues "54,58,61,67" \
+  --contact_residues "24,27,31,54" \
   --contact_target_chain A
 ```
 
 For a single-chain target, `--contact_target_chain` may be omitted. For a multi-chain target, it is required whenever `--contact_residues` is used.
 
-Residues are given by the residue numbers of the supplied PDB file, not by their position in the chain: `examples/mdm2/mdm2_pro.pdb`
-numbers its residues 25–109, so `54` is Leu54. An insertion code is appended to the number, for example `52A`. HighSS converts the
-numbers to positions in the target sequence before it writes the constraint, prints the conversion in the run header, and stops with
-an error if a number is not a standard residue of the chain.
+Target residue numbering is taken from the supplied PDB.
 
 ## Disulfide objective
 
@@ -207,10 +203,8 @@ dihedral |target|/tolerance:     90° / 45°
 angle/dihedral loss weights:     0.0005 / 0.0002
 ```
 
-Disulfide loss and its backpropagation are enabled by default. The loss includes a distogram pairing term, which is
-backpropagated to the sequence logits, and coordinate-based SG-SG distance, worst-pair, angle and dihedral terms, which are
-evaluated during stages that sample coordinates and enter the logged total; they carry a sequence gradient only when
-`--disulfide_grad_steps` is greater than 0 (default 0).
+Disulfide loss and its backpropagation are enabled by default. The loss includes a distogram pairing term and coordinate-based
+SG-SG distance, worst-pair, angle and dihedral terms. Geometry terms are evaluated during stages that sample coordinates.
 
 The default input and distogram settings are `--disulfide_distogram_loss 4.0`, `--disulfide_distogram_form nll`,
 `--loop_fix_cys true`, `--pre_drop_bonds true` and `--loop_profile token`. Their details are in `docs/PARAMETERS.md`.
@@ -221,8 +215,8 @@ The default input and distogram settings are `--disulfide_distogram_loss 4.0`, `
 
 | Setting | Command option | Effect |
 |---|---|---|
-| Enabled (default) | `--use_disulfide_loss true` | Enables the disulfide loss; the distogram term is backpropagated to the sequence logits |
-| Disabled | `--use_disulfide_loss false` | Removes every explicit disulfide-loss term and its backpropagation |
+| Enabled (default) | `--use_disulfide_loss true` | Enables the standard disulfide objective, including distogram and geometry backpropagation |
+| Disabled | `--use_disulfide_loss false` | Removes every explicit disulfide-loss term and disables geometry backpropagation |
 
 The enabled setting is used when this option is omitted.
 
@@ -310,8 +304,8 @@ Reference Boltz-1 fine-tuning scripts and configurations for the
 monomer-fine-tuned (`mon-FT`) and complex-fine-tuned (`com-FT`) models are
 provided in [`training/`](training/README.md).
 
-The released checkpoints (`mon-FT.ckpt`, `com-FT.ckpt`) and the chemical component dictionary (`ccd.pkl`) are distributed
-separately through Figshare (<https://doi.org/10.6084/m9.figshare.33069275>) and are not stored in this Git repository.
+The released checkpoints and chemical component dictionary are distributed
+separately through Figshare and are not stored in this Git repository.
 
 Training commands, required inputs and configuration paths are described in
 [`training/README.md`](training/README.md).
