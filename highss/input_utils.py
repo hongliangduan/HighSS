@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -25,15 +26,30 @@ class InputConfig:
             directory.mkdir(parents=True, exist_ok=True)
 
 
-def get_chains_sequence(pdb_path: str | Path) -> dict[str, str]:
-    """Extract standard amino-acid sequences from a PDB file."""
-    aa3_to_aa1 = {
-        "ALA": "A", "CYS": "C", "ASP": "D", "GLU": "E", "PHE": "F",
-        "GLY": "G", "HIS": "H", "ILE": "I", "LYS": "K", "LEU": "L",
-        "MET": "M", "ASN": "N", "PRO": "P", "GLN": "Q", "ARG": "R",
-        "SER": "S", "THR": "T", "VAL": "V", "TRP": "W", "TYR": "Y",
-    }
-    sequences: dict[str, list[str]] = {}
+_AA3_TO_AA1 = {
+    "ALA": "A", "CYS": "C", "ASP": "D", "GLU": "E", "PHE": "F",
+    "GLY": "G", "HIS": "H", "ILE": "I", "LYS": "K", "LEU": "L",
+    "MET": "M", "ASN": "N", "PRO": "P", "GLN": "Q", "ARG": "R",
+    "SER": "S", "THR": "T", "VAL": "V", "TRP": "W", "TYR": "Y",
+}
+
+
+def _residue_label(number: str, insertion_code: str = "") -> str:
+    """PDB residue label such as ``54``, ``-3`` or ``52A``."""
+    try:
+        number = str(int(number))
+    except ValueError:
+        number = number.upper()
+    return number + insertion_code.upper()
+
+
+def _read_chain_residues(pdb_path: str | Path) -> dict[str, list[tuple[str, str]]]:
+    """Read the standard amino-acid residues of every chain of a PDB file.
+
+    Returns, for each chain ID, ``(label, one-letter code)`` pairs in file order. The label is the residue number of the PDB file
+    followed by its insertion code. Only ATOM records of the 20 standard amino acids are read, and each residue is listed once.
+    """
+    residues: dict[str, list[tuple[str, str]]] = {}
     seen: dict[str, set[tuple[str, str]]] = {}
     with Path(pdb_path).open() as handle:
         for line in handle:
@@ -43,16 +59,58 @@ def get_chains_sequence(pdb_path: str | Path) -> dict[str, str]:
             residue = line[17:20].strip().upper()
             residue_number = line[22:26].strip()
             insertion_code = line[26].strip()
-            aa = aa3_to_aa1.get(residue)
+            aa = _AA3_TO_AA1.get(residue)
             if aa is None:
                 continue
             key = (residue_number, insertion_code)
-            sequences.setdefault(chain, [])
+            residues.setdefault(chain, [])
             seen.setdefault(chain, set())
             if key not in seen[chain]:
                 seen[chain].add(key)
-                sequences[chain].append(aa)
-    return {chain: "".join(seq) for chain, seq in sequences.items()}
+                residues[chain].append((_residue_label(residue_number, insertion_code), aa))
+    return residues
+
+
+def get_chains_sequence(pdb_path: str | Path) -> dict[str, str]:
+    """Extract standard amino-acid sequences from a PDB file."""
+    return {chain: "".join(aa for _, aa in residues) for chain, residues in _read_chain_residues(pdb_path).items()}
+
+
+def get_chain_residue_labels(pdb_path: str | Path) -> dict[str, list[str]]:
+    """PDB residue labels (``54``, ``52A``) of each chain, in the order of the sequences from :func:`get_chains_sequence`."""
+    return {chain: [label for label, _ in residues] for chain, residues in _read_chain_residues(pdb_path).items()}
+
+
+_RESIDUE_TOKEN = re.compile(r"^(-?\d+)([A-Za-z]?)$")
+
+
+def resolve_contact_residues(spec: str, labels: list[str], chain: str = "") -> list[int]:
+    """Convert PDB residue numbers of one chain into 1-based positions in the chain sequence.
+
+    ``spec`` is the comma-separated ``--contact_residues`` text with residue numbers as they appear in the PDB file; an insertion
+    code may follow the number (``52A``). ``labels`` are the residue labels of that chain from :func:`get_chain_residue_labels`.
+    The pocket constraint of the input YAML counts residues from 1 along the chain sequence that HighSS passes to the predictor,
+    so the position of a residue is its place in that sequence.
+    """
+    where = {label: position for position, label in enumerate(labels, start=1)}
+    positions: list[int] = []
+    for raw in spec.split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        match = _RESIDUE_TOKEN.match(token)
+        if match is None:
+            raise ValueError(f"Invalid contact residue '{token}'. Use PDB residue numbers such as 54 or 52A.")
+        label = _residue_label(match.group(1), match.group(2))
+        if label not in where:
+            span = f"{labels[0]} to {labels[-1]}" if labels else "none"
+            raise ValueError(
+                f"Contact residue {token} is not a standard residue of chain {chain or '?'} in the PDB (residues {span})."
+            )
+        positions.append(where[label])
+    if not positions:
+        raise ValueError("--contact_residues lists no residue numbers.")
+    return positions
 
 
 def parse_disulfide_pairs(spec: str, binder_length: int) -> list[tuple[int, int]]:
@@ -187,7 +245,11 @@ def generate_protein_binder_yaml(
     contact_target_index: int | None = None,
     contact_residues: str = "",
 ) -> tuple[dict, Path, list[str]]:
-    """Write a HighSS protein-target YAML with an empty binder MSA."""
+    """Write a HighSS protein-target YAML with an empty binder MSA.
+
+    The binder is always the first sequence of the YAML. ``contact_residues`` are 1-based positions in the sequence of the
+    contact target chain; the command line converts PDB residue numbers to these positions first.
+    """
     target_output_chains = assign_target_chain_ids(len(target_sequences), binder_chain)
     sequences = [{
         "protein": {

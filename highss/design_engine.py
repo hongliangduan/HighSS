@@ -494,7 +494,10 @@ def add_disulfide_distance_loss(sample_atom_coords, batch, binder_bonds: str, bi
                                 angle_target: float = 103.0,
                                 angle_tolerance: float = 15.0,
                                 dihedral_target_abs: float = 90.0,
-                                dihedral_tolerance: float = 30.0):
+                                dihedral_tolerance: float = 30.0,
+                                dist_term_cap: float = None,
+                                angle_term_cap: float = None,
+                                dihedral_term_cap: float = None):
     """Differentiable multi-disulfide stereochemistry loss.
 
     v7 returns five values:
@@ -545,6 +548,8 @@ def add_disulfide_distance_loss(sample_atom_coords, batch, binder_bonds: str, bi
             dist_term = lower_term + upper_term + center_term
         else:
             dist_term = torch.relu(d - hinge_cutoff) ** 2
+        if dist_term_cap is not None:
+            dist_term = torch.clamp(dist_term, max=dist_term_cap)
         dist_terms.append(dist_term)
         report.append(float(d.detach().cpu().item()))
 
@@ -554,13 +559,19 @@ def add_disulfide_distance_loss(sample_atom_coords, batch, binder_bonds: str, bi
             angle2 = _angle_degrees(coords[sg_i] - coords[sg_j], coords[cb_j] - coords[sg_j])
             aerr1 = torch.relu(torch.abs(angle1 - angle_target) - angle_tolerance) ** 2
             aerr2 = torch.relu(torch.abs(angle2 - angle_target) - angle_tolerance) ** 2
-            angle_terms.append(0.5 * (aerr1 + aerr2))
+            angle_term = 0.5 * (aerr1 + aerr2)
+            if angle_term_cap is not None:
+                angle_term = torch.clamp(angle_term, max=angle_term_cap)
+            angle_terms.append(angle_term)
 
             dih = _dihedral_degrees(coords[cb_i], coords[sg_i], coords[sg_j], coords[cb_j])
             err_pos = torch.abs(_periodic_angle_error_degrees(dih, dihedral_target_abs))
             err_neg = torch.abs(_periodic_angle_error_degrees(dih, -dihedral_target_abs))
             derr = torch.minimum(err_pos, err_neg)
-            dihedral_terms.append(torch.relu(derr - dihedral_tolerance) ** 2)
+            dihedral_term = torch.relu(derr - dihedral_tolerance) ** 2
+            if dihedral_term_cap is not None:
+                dihedral_term = torch.clamp(dihedral_term, max=dihedral_term_cap)
+            dihedral_terms.append(dihedral_term)
 
     if not dist_terms:
         return zero, zero, zero, zero, report
@@ -568,6 +579,154 @@ def add_disulfide_distance_loss(sample_atom_coords, batch, binder_bonds: str, bi
     angle_loss = torch.stack(angle_terms).mean() if angle_terms else zero
     dihedral_loss = torch.stack(dihedral_terms).mean() if dihedral_terms else zero
     return dist_stack.mean(), dist_stack.max(), angle_loss, dihedral_loss, report
+
+_SDS_ANGLE_CAP = 3600.0      # (60 deg beyond the tolerance)^2
+_SDS_DIHEDRAL_CAP = 3600.0
+
+
+def disulfide_sds_losses(coords_list, batch, clip=2.0, **geom):
+    """Disulfide geometry terms on graph-attached one-step denoiser estimates.
+
+    coords_list: coordinate tensors from AtomDiffusion.denoise_grad (one per noise level). Each goes through
+    add_disulfide_distance_loss with the same settings as the ordinary terms (**geom) but with every per-pair
+    term capped, so that a hopeless structure (SG-SG far beyond the bound) contributes no gradient instead of
+    dominating the normalised sequence gradient: distance terms at clip**2 (a violation of `clip` Angstrom),
+    angle / dihedral terms at 60 deg beyond their tolerance.
+    Returns the means over the levels of (mean distance term, worst pair, angle, dihedral).
+    """
+    outs = [add_disulfide_distance_loss(c, batch, dist_term_cap=float(clip) ** 2,
+                                        angle_term_cap=_SDS_ANGLE_CAP, dihedral_term_cap=_SDS_DIHEDRAL_CAP,
+                                        **geom)[:4] for c in coords_list]
+    return tuple(torch.stack([o[k] for o in outs]).mean() for k in range(4))
+
+
+_SDS_PROFILE_STATE = {'calls': 0}
+
+
+def _sds_profile_ts(binder_bonds, pre_run, distogram_only, every, ts):
+    """Noise levels (Angstrom) for the --debug_sds_profile_every diagnostic in this call; () = skip.
+
+    Counts the calls that can have a disulfide term (not the pre-run) and profiles every `every`-th one.
+    """
+    if not every or int(every) <= 0 or not binder_bonds or pre_run or distogram_only:
+        return ()
+    n = _SDS_PROFILE_STATE['calls']
+    _SDS_PROFILE_STATE['calls'] = n + 1
+    return tuple(float(t) for t in ts) if n % int(every) == 0 else ()
+
+
+def sds_profile_report(batch, losses, loss_scales, dict_out, geom, binder_chain='A', stage='none'):
+    """Diagnostic for the denoiser-estimate gradient path (prints '[sds_profile]' lines, returns the rows).
+
+    For every noise level t in dict_out['sds_profile'] = [(t, graph-attached denoised coordinates), ...]:
+    the disulfide terms (weights of this epoch, i.e. --disulfide_sds_scale 1, uncapped) on the estimate, the norm
+    of their gradient w.r.t. the sequence logits (masked like the optimiser sees it), its ratio to the gradient
+    of all non-disulfide terms and its cosine with that gradient, with the gradient of the distogram Cys-Cys
+    term (if present) and with the last-K-steps gradient (if --disulfide_grad_steps > 0).
+    """
+    lg = batch['res_type_logits']
+
+    def grad_of(t):
+        if t is None or not torch.is_tensor(t) or not t.requires_grad:
+            return None
+        old = lg.grad
+        lg.grad = None
+        t.backward(retain_graph=True)
+        g = lg.grad
+        lg.grad = old
+        if g is None:
+            return None
+        g = g.detach().clone()
+        g[batch['entity_id'] != chain_to_number[binder_chain], :] = 0
+        g[..., [0, 1, 6, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]] = 0
+        return g.flatten()
+
+    def norm(g):
+        return None if g is None else float(g.norm().item())
+
+    def cos(a, b):
+        if a is None or b is None:
+            return None
+        na, nb = float(a.norm().item()), float(b.norm().item())
+        return None if na == 0.0 or nb == 0.0 else float((a @ b).item()) / (na * nb)
+
+    def sci(v):
+        return 'NONE' if v is None else f'{v:.3e}'
+
+    def fix(v):
+        return 'NONE' if v is None else f'{v:.3f}'
+
+    wkeys = ('disulfide_loss', 'disulfide_worst_pair_loss', 'disulfide_angle_loss', 'disulfide_dihedral_loss')
+    others = [k for k in losses if not k.startswith('disulfide')]
+    g_oth = grad_of(sum(losses[k] * loss_scales.get(k, 0.0) for k in others))
+    g_nll = grad_of(losses.get('disulfide_distogram_loss'))
+    kk = [k for k in wkeys if k in losses]
+    g_k = (grad_of(sum(losses[k] * loss_scales.get(k, 0.0) for k in kk))
+           if (dict_out.get('sample_atom_coords_grad') is not None and kk) else None)
+    n_oth = norm(g_oth)
+    with torch.no_grad():
+        d_fin = add_disulfide_distance_loss(dict_out['sample_atom_coords'], batch, **geom)[4]
+    print(f"[sds_profile] stage={stage} d_final={[round(x, 2) for x in d_fin]} other_grad_norm={sci(n_oth)} "
+          f"nll_grad_norm={sci(norm(g_nll))} kstep_grad_norm={sci(norm(g_k))}")
+    rows = []
+    for t, coords in dict_out['sds_profile']:
+        res = add_disulfide_distance_loss(coords, batch, **geom)
+        total = sum(loss_scales.get(k, 0.0) * v for k, v in zip(wkeys, res[:4]))
+        g_t = grad_of(total)
+        n_t = norm(g_t)
+        ratio = None if (n_t is None or not n_oth) else n_t / n_oth
+        row = dict(t=float(t), d_hat=res[4], loss=float(total.item()), grad_norm=n_t, ratio=ratio,
+                   cos_other=cos(g_t, g_oth), cos_nll=cos(g_t, g_nll), cos_k=cos(g_t, g_k))
+        rows.append(row)
+        print(f"[sds_profile] t={t:.2f} d_hat={[round(x, 2) for x in res[4]]} L={row['loss']:.3e} "
+              f"grad_norm={sci(n_t)} ratio={sci(ratio)} cos_other={fix(row['cos_other'])} "
+              f"cos_nll={fix(row['cos_nll'])} cos_k={fix(row['cos_k'])}")
+    return rows
+
+
+def add_disulfide_distogram_loss(pdist, mid_pts, batch, binder_bonds, binder_chain='A',
+                                 index_base=0, lo=3.3, hi=4.8, form='prob'):
+    """Differentiable disulfide term from the distogram head (no structure sampling needed).
+
+    For every prescribed Cys-Cys pair, 1 - P(distance in [lo, hi]) under the predicted
+    distogram of the two tokens. The Boltz distogram is defined on C-beta (C-alpha for Gly);
+    for a disulfide the C-beta--C-beta distance is typically about 3.4-4.6 A, so [3.3, 4.8]
+    is the default window. Returns a scalar loss and a detached list of in-window masses.
+
+    form='prob': 1 - P(window). Its gradient w.r.t. the logits is proportional to P(window), so it
+                 vanishes when the pair is far from the window (P(window) of a few percent).
+    form='nll' : -log P(window), the form the HighSS contact losses use; the gradient w.r.t. the
+                 logits stays O(1) however small P(window) is.
+    """
+    pairs = parse_sg_sg_bonds_for_loss(binder_bonds, index_base)
+    zero = pdist.sum() * 0.0
+    if not pairs:
+        return zero, []
+    entity_id = batch['entity_id'][0] if batch['entity_id'].dim() == 2 else batch['entity_id']
+    binder_tokens = torch.nonzero(entity_id == chain_to_number[binder_chain], as_tuple=False).flatten()
+    window = (mid_pts >= lo) & (mid_pts <= hi)
+    if form not in ('prob', 'nll'):
+        raise ValueError(f"form must be 'prob' or 'nll', got {form!r}")
+    if not bool(window.any()):
+        raise ValueError('empty distogram window')
+    terms, report = [], []
+    for i, j in pairs:
+        if i < 0 or j < 0 or i >= binder_tokens.numel() or j >= binder_tokens.numel():
+            continue
+        ti, tj = int(binder_tokens[i].item()), int(binder_tokens[j].item())
+        if form == 'nll':
+            lg = pdist[0, ti, tj].float()
+            log_mass = torch.logsumexp(lg[window], dim=-1) - torch.logsumexp(lg, dim=-1)
+            mass = log_mass.exp()
+            terms.append(-log_mass)
+        else:
+            p = torch.softmax(pdist[0, ti, tj], dim=-1)
+            mass = p[window].sum()
+            terms.append(1.0 - mass)
+        report.append(float(mass.detach().cpu().item()))
+    if not terms:
+        return zero, report
+    return torch.stack(terms).mean(), report
 
 def _scheduled_disulfide_params(stage: str, frac: float, base_weight: float, schedule: bool,
                                 cutoff_default: float, cutoff_start: float, cutoff_end: float,
@@ -675,7 +834,26 @@ def boltz_hallucination(
     disulfide_angle_tolerance=15.0,
     disulfide_dihedral_target_abs=90.0,
     disulfide_dihedral_tolerance=30.0,
+    disulfide_grad_steps=0,
+    debug_grad_norm=False,
+    disulfide_sds_scale=0.0,
+    disulfide_sds_samples=2,
+    disulfide_sds_sigma_lo=1.5,
+    disulfide_sds_sigma_hi=6.0,
+    disulfide_sds_clip=2.0,
+    disulfide_sds_profile_every=0,
+    disulfide_sds_profile_t=(1.5, 3.0, 6.0, 12.0, 24.0, 48.0),
+    disulfide_distogram_lo=3.3,
+    disulfide_distogram_hi=4.8,
+    disulfide_distogram_form='prob',
+    loop_fix_cys=False,
+    loop_drop_bonds=False,
+    pre_drop_bonds=False,
+    loop_profile='mean',
 ):
+
+    if loop_profile not in ('mean', 'token_pre', 'token'):
+        raise ValueError(f"loop_profile must be 'mean', 'token_pre' or 'token', got {loop_profile!r}")
 
     predict_args = {
         "recycling_steps": recycling_steps,  # Default value
@@ -808,6 +986,25 @@ def boltz_hallucination(
     mask = torch.ones_like(batch['res_type_logits'])
     mask[batch['entity_id']!=chain_to_number[binder_chain], :] = 0
     chain_mask = (batch['entity_id'] == chain_to_number[binder_chain]).int()
+    loop_fix = None
+    if loop_fix_cys and fix_residues:
+        # Write the prescribed residues into res_type inside the loop (see build_loop_fix).
+        _binder_rows = torch.nonzero(batch['entity_id'][0] == chain_to_number[binder_chain]).flatten()
+        loop_fix = build_loop_fix(batch['res_type_logits'], _binder_rows,
+                                  fixed_residue_types(fix_residues, length, residue_index_base), alphabet)
+        print(f"[loop_fix_cys] prescribed residues are written into res_type inside the design loop: {fix_residues}")
+    if loop_drop_bonds or (pre_drop_bonds and pre_run):
+        # Diagnostic: no bond feature inside the loop (the semi-greedy and final predictions still get the constraints).
+        # --pre_drop_bonds: the same, but in the pre-run only (the design stages keep the bond feature).
+        drop_token_bonds(batch)
+        if loop_drop_bonds:
+            print("[loop_drop_bonds] token_bonds is zeroed inside the design loop (diagnostic)")
+        else:
+            print("[pre_drop_bonds] token_bonds is zeroed in the pre-run only (the design stages and the final prediction keep it)")
+    if loop_profile != 'mean':
+        print(f"[loop_profile] {loop_profile}: each binder token gets its own residue as profile "
+              f"({'in the pre-run only' if loop_profile == 'token_pre' else 'in every design stage'}); "
+              "mean = the averaged composition of the binder (RC3)")
     mid_points = torch.linspace(2, 22, 64).to(device) 
 
     def design(batch, 
@@ -867,7 +1064,16 @@ def boltz_hallucination(
                 'diffusion_samples': predict_args["diffusion_samples"],
                 'run_confidence_sequentially': True,
                 'disconnect_feats': disconnect_feats,
-                'disconnect_pairformer': disconnect_pairformer
+                'disconnect_pairformer': disconnect_pairformer,
+                # Opt-in: let the disulfide geometry loss send gradients back through the
+                # last K diffusion steps (0: the loss is logged only; zero loss weight also keeps the route closed).
+                'structure_grad_steps': int(disulfide_grad_steps) if (binder_bonds and (loss_scales or {}).get('disulfide_loss', 0.0) != 0.0) else 0,
+                # Opt-in: graph-attached one-step denoiser estimates for the disulfide terms
+                # (--disulfide_sds_scale > 0), see AtomDiffusion.denoise_grad.
+                'structure_sds_samples': int(disulfide_sds_samples) if (binder_bonds and disulfide_sds_scale > 0 and (loss_scales or {}).get('disulfide_loss', 0.0) != 0.0) else 0,
+                'structure_sds_sigma': (float(disulfide_sds_sigma_lo), float(disulfide_sds_sigma_hi)),
+                'structure_sds_profile': _sds_profile_ts(binder_bonds, pre_run, distogram_only,
+                                                          disulfide_sds_profile_every, disulfide_sds_profile_t),
             }
 
             if save_trajectory:
@@ -883,6 +1089,7 @@ def boltz_hallucination(
                     dict_out = boltz_model.get_distogram_confidence(batch, **confidence_args)
 
 
+            ss_distances = []
             pdist = dict_out['pdistogram']
             mid_pts = get_mid_points(pdist).to(device)
 
@@ -930,6 +1137,14 @@ def boltz_hallucination(
                         'helix_loss': helix_loss
                     }           
 
+            if binder_bonds and (loss_scales or {}).get('disulfide_distogram_loss', 0.0) != 0.0:
+                _dg_loss, _dg_mass = add_disulfide_distogram_loss(
+                    pdist, mid_pts, batch, binder_bonds, binder_chain=binder_chain,
+                    index_base=residue_index_base,
+                    lo=disulfide_distogram_lo, hi=disulfide_distogram_hi,
+                    form=disulfide_distogram_form)
+                losses['disulfide_distogram_loss'] = _dg_loss
+
             if not pre_run and not distogram_only:
                 plddt_loss = get_plddt_loss(dict_out['plddt'], mask_1d=chain_mask)
                 pae = (dict_out['pae'] + dict_out['pae'].transpose(-2,-1))/2
@@ -951,7 +1166,7 @@ def boltz_hallucination(
                 if binder_bonds and active_loss_scales.get('disulfide_loss', 0.0) != 0.0:
                     current_cutoff = disulfide_current_hinge_cutoff if disulfide_current_hinge_cutoff is not None else disulfide_hinge_cutoff
                     disulfide_loss, disulfide_worst_pair_loss, disulfide_angle_loss, disulfide_dihedral_loss, ss_distances = add_disulfide_distance_loss(
-                        dict_out['sample_atom_coords'],
+                        dict_out.get('sample_atom_coords_grad', dict_out['sample_atom_coords']),
                         batch,
                         binder_bonds=binder_bonds,
                         binder_chain=binder_chain,
@@ -974,6 +1189,28 @@ def boltz_hallucination(
                         losses['disulfide_angle_loss'] = disulfide_angle_loss
                     if active_loss_scales.get('disulfide_dihedral_loss', 0.0) != 0.0:
                         losses['disulfide_dihedral_loss'] = disulfide_dihedral_loss
+                    if dict_out.get('denoised_atom_coords_grad') and active_loss_scales.get('disulfide_sds_loss', 0.0) != 0.0:
+                        _sds = disulfide_sds_losses(
+                            dict_out['denoised_atom_coords_grad'], batch,
+                            clip=disulfide_sds_clip,
+                            binder_bonds=binder_bonds,
+                            binder_chain=binder_chain,
+                            index_base=residue_index_base,
+                            target_dist=disulfide_target_dist,
+                            hinge_cutoff=current_cutoff,
+                            mode=disulfide_distance_mode,
+                            lower_bound=disulfide_lower_bound,
+                            upper_bound=disulfide_upper_bound,
+                            center_weight=disulfide_center_weight,
+                            angle_target=disulfide_angle_target,
+                            angle_tolerance=disulfide_angle_tolerance,
+                            dihedral_target_abs=disulfide_dihedral_target_abs,
+                            dihedral_tolerance=disulfide_dihedral_tolerance,
+                        )
+                        losses['disulfide_sds_loss'] = _sds[0]
+                        losses['disulfide_sds_worst_pair_loss'] = _sds[1]
+                        losses['disulfide_sds_angle_loss'] = _sds[2]
+                        losses['disulfide_sds_dihedral_loss'] = _sds[3]
                 
                 plddt_loss_history.append(plddt_loss.item())
 
@@ -997,7 +1234,52 @@ def boltz_hallucination(
 
             # Calculate total loss and print individual losses
             total_loss = sum(loss * loss_scales.get(name, 0.0) for name, loss in losses.items())
+            if debug_grad_norm and not pre_run:
+                # Opt-in diagnostic: norm of d(loss)/d(sequence logits) split into the disulfide
+                # terms and everything else. NONE means the term has no autograd graph.
+                try:
+                    _ss_keys = [k for k in losses if k.startswith('disulfide')]
+                    _ot_keys = [k for k in losses if k not in _ss_keys]
+                    def _wsum(ks):
+                        return sum(losses[k] * loss_scales.get(k, 0.0) for k in ks) if ks else None
+                    def _gnorm(t):
+                        # checkpointed Boltz layers do not support torch.autograd.grad, so use
+                        # .backward() on a saved/restored .grad of the logits instead
+                        if t is None or not torch.is_tensor(t) or not t.requires_grad:
+                            return None
+                        _lg = batch['res_type_logits']
+                        _old = _lg.grad
+                        _lg.grad = None
+                        t.backward(retain_graph=True)
+                        _g = _lg.grad
+                        _out = None if _g is None else float(_g.norm().item())
+                        _lg.grad = _old
+                        return _out
+                    _gs, _go = _gnorm(_wsum(_ss_keys)), _gnorm(_wsum(_ot_keys))
+                    _fmt = lambda v: 'NONE' if v is None else f'{v:.4e}'
+                    print(f"[debug_grad_norm] disulfide_grad_norm={_fmt(_gs)} other_grad_norm={_fmt(_go)}"
+                          + ("" if (_gs is None or not _go) else f" ratio={_gs/_go:.3f}"))
+                except Exception as _e:
+                    print(f"[debug_grad_norm] failed: {_e}")
+            if dict_out.get('sds_profile') and binder_bonds:
+                try:
+                    sds_profile_report(
+                        batch, losses, loss_scales, dict_out,
+                        dict(binder_bonds=binder_bonds, binder_chain=binder_chain, index_base=residue_index_base,
+                             target_dist=disulfide_target_dist,
+                             hinge_cutoff=(disulfide_current_hinge_cutoff if disulfide_current_hinge_cutoff is not None
+                                           else disulfide_hinge_cutoff),
+                             mode=disulfide_distance_mode, lower_bound=disulfide_lower_bound,
+                             upper_bound=disulfide_upper_bound, center_weight=disulfide_center_weight,
+                             angle_target=disulfide_angle_target, angle_tolerance=disulfide_angle_tolerance,
+                             dihedral_target_abs=disulfide_dihedral_target_abs,
+                             dihedral_tolerance=disulfide_dihedral_tolerance),
+                        binder_chain=binder_chain, stage=disulfide_stage)
+                except Exception as _e:
+                    print(f"[sds_profile] failed: {_e}")
             loss_str = [f"{k}:{v.item():.2f}" for k,v in losses.items()]
+            if ss_distances:
+                loss_str.append(format_sg_distances(ss_distances))
             plots.append(px[0].detach().cpu().numpy())
             loss_history.append(total_loss.item())
             i_con_loss_history.append(i_con_loss.item())
@@ -1017,13 +1299,23 @@ def boltz_hallucination(
             batch['pseudo'] =  opt["soft"] * batch["soft"] + (1-opt["soft"]) * batch["res_type_logits"]
             batch['pseudo'] = opt["hard"] * batch["hard"] + (1-opt["hard"]) * batch["pseudo"]
             batch['res_type'] = batch['pseudo']*mask + batch['res_type_logits']*(1-mask)
+            if loop_fix is not None:
+                batch['res_type'] = apply_loop_fix(batch['res_type'], *loop_fix)
         
             if non_protein_target:
                 batch['msa'] = batch['res_type'].unsqueeze(0).to(device).detach()
                 batch['profile'] = batch['msa'].float().mean(dim=0).to(device).detach()
             else:
                 batch['msa'][:,0,:,:] = batch['res_type'].to(device).detach()
-                batch['profile'][batch['entity_id']==chain_to_number[binder_chain],:] = batch['msa'][:, 0, (batch['entity_id']==chain_to_number[binder_chain])[0],:].float().mean(dim=1).to(device).detach()
+                _binder_sel = (batch['entity_id']==chain_to_number[binder_chain])[0]
+                if opt.get("token_profile", False):
+                    # --loop_profile token_pre / token: the per-token profile of the true features (what boltz predict feeds the model),
+                    # i.e. the mean over the MSA rows of each binder token (one row: its own residue)
+                    _profile = batch['msa'][:, :, _binder_sel, :].float().mean(dim=1).reshape(-1, batch['msa'].shape[-1])
+                else:
+                    # mean (RC3): every binder token gets the mean composition of the binder
+                    _profile = batch['msa'][:, 0, _binder_sel, :].float().mean(dim=1)
+                batch['profile'][batch['entity_id']==chain_to_number[binder_chain],:] = _profile.to(device).detach()
 
             return batch
         
@@ -1050,6 +1342,7 @@ def boltz_hallucination(
 
             opt["lr_rate"] = learning_rate * lr_scale
                 
+            opt["token_profile"] = loop_profile == "token" or (loop_profile == "token_pre" and pre_run)
             batch = update_sequence(opt, batch, mask, non_protein_target=non_protein_target, binder_chain=binder_chain)
             # v6 stage-aware disulfide schedule: relaxed topology closure in soft,
             # annealed cutoff during temperature, strict refinement in hard.
@@ -1065,6 +1358,12 @@ def boltz_hallucination(
                 )
                 current_loss_scales = dict(loss_scales)
                 current_loss_scales['disulfide_loss'] = ss_weight
+                if disulfide_sds_scale > 0:
+                    # the SDS terms reuse the weights of the ordinary disulfide terms, times disulfide_sds_scale
+                    current_loss_scales['disulfide_sds_loss'] = ss_weight * disulfide_sds_scale
+                    for _k in ('worst_pair', 'angle', 'dihedral'):
+                        current_loss_scales[f'disulfide_sds_{_k}_loss'] = (
+                            loss_scales.get(f'disulfide_{_k}_loss', 0.0) * disulfide_sds_scale)
             total_loss, plots, loss_history, i_con_loss_history, con_loss_history, distogram_history, sequence_history, plddt_loss_history, loss_str, traj_coords, traj_plddt = get_model_loss(batch, plots, loss_history, i_con_loss_history, con_loss_history, plddt_loss_history, distogram_history, sequence_history, pre_run, mask_ligand, distogram_only, predict_args, current_loss_scales, binder_chain, increasing_contact_over_itr, optimize_contact_per_binder_pos=optimize_contact_per_binder_pos, num_inter_contacts= num_inter_contacts, num_intra_contacts=num_intra_contacts, num_optimizing_binder_pos=num_optimizing_binder_pos, inter_chain_cutoff=inter_chain_cutoff, intra_chain_cutoff=intra_chain_cutoff, save_trajectory = save_trajectory, disulfide_current_hinge_cutoff=current_ss_cutoff)
             traj_coords_list.append(traj_coords)
             traj_plddt_list.append(traj_plddt)
@@ -1073,6 +1372,8 @@ def boltz_hallucination(
                 diff_count = sum(1 for a, b in zip(current_sequence, prev_sequence) if a != b)
                 diff_percentage = (diff_count / length) * 100
             prev_sequence = current_sequence
+            if i == 0 or i == iters - 1:
+                print(f"[loop_seq] pre_run={pre_run} stage={disulfide_stage} epoch={i} seq={current_sequence}")
             total_loss.backward()
             if batch['res_type_logits'].grad is not None:
                 batch['res_type_logits'].grad[batch['entity_id']!=chain_to_number[binder_chain],:] = 0
@@ -1335,6 +1636,72 @@ def apply_fixed_residues(sequence: str, fix_residues: str = '', index_base: int 
 
 
 
+def fixed_residue_types(fix_residues: str = '', length: int | None = None, index_base: int = 0) -> dict:
+    """Map 0-based binder positions to one-letter residues for --fix_residues ("2_C,6_C" style)."""
+    types: dict = {}
+    if not fix_residues:
+        return types
+    for item in fix_residues.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        fields = item.split('_')
+        if len(fields) != 2:
+            raise ValueError(f"Invalid fixed residue '{item}'. Expected format pos_AA.")
+        seq_idx = _to_yaml_position(int(fields[0]), index_base) - 1
+        if length is not None and (seq_idx < 0 or seq_idx >= length):
+            raise ValueError(f"Fixed residue '{item}' maps to position {seq_idx + 1}, but sequence length is {length}.")
+        types[seq_idx] = fields[1].strip().upper()
+    return types
+
+
+def build_loop_fix(res_type_like, binder_rows, fixed_types, alphabet):
+    """One-hot rows and a row mask (both shaped like res_type_like) for the fixed binder positions.
+
+    The design loop leaves the prescribed positions designable and, because Cys is excluded from the design
+    alphabet, types them as some other amino acid although their atoms are Cys. With --loop_fix_cys true the
+    loop writes the fixed residues into res_type instead.
+    """
+    one_hot = torch.zeros_like(res_type_like)
+    row_mask = torch.zeros_like(res_type_like)
+    for idx, aa in fixed_types.items():
+        try:
+            channel = alphabet.index(aa, 2)
+        except ValueError as exc:
+            raise ValueError(f"cannot write fixed residue '{aa}' into res_type") from exc
+        row = int(binder_rows[idx])
+        one_hot[:, row, channel] = 1.0
+        row_mask[:, row, :] = 1.0
+    return one_hot, row_mask
+
+
+def apply_loop_fix(res_type, one_hot, row_mask):
+    """res_type with the fixed rows replaced by their one-hot (the logits receive no gradient through these rows)."""
+    return res_type * (1.0 - row_mask) + one_hot
+
+
+def drop_token_bonds(batch):
+    """Diagnostic (--loop_drop_bonds true): zero the token_bonds feature, so the model gets no bond input."""
+    batch['token_bonds'] = torch.zeros_like(batch['token_bonds'])
+    return batch
+
+
+def format_sg_distances(distances):
+    """'sg_sg:2.31/2.05' for the Epoch log line: SG-SG distance (A) of every prescribed pair, in --disulfide_pairs order."""
+    return "sg_sg:" + "/".join(f"{float(d):.2f}" for d in distances)
+
+
+def seed_everything(seed):
+    """--seed: seed python, numpy and torch (CPU and CUDA)."""
+    import random as _random
+    import numpy as _np
+    _random.seed(seed)
+    _np.random.seed(seed % (2 ** 32))
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def fixed_residue_indices(fix_residues: str = '', length: int | None = None, index_base: int = 0) -> set[int]:
     """Return 0-based sequence indices declared in --fix_residues."""
     indices: set[int] = set()
@@ -1428,6 +1795,18 @@ def run_highss_design(
     disulfide_angle_tolerance=15.0,
     disulfide_dihedral_target_abs=90.0,
     disulfide_dihedral_tolerance=30.0,
+    disulfide_grad_steps=0,
+    debug_grad_norm=False,
+    disulfide_sds_scale=0.0,
+    disulfide_sds_samples=2,
+    disulfide_sds_sigma_lo=1.5,
+    disulfide_sds_sigma_hi=6.0,
+    disulfide_sds_clip=2.0,
+    disulfide_sds_profile_every=0,
+    disulfide_sds_profile_t=(1.5, 3.0, 6.0, 12.0, 24.0, 48.0),
+    disulfide_distogram_lo=3.3,
+    disulfide_distogram_hi=4.8,
+    disulfide_distogram_form='prob',
 ):
     """
     Run Boltz protein design pipeline.
@@ -1503,11 +1882,14 @@ def run_highss_design(
     rmsd_csv_path = os.path.join(results_final_dir, 'rmsd_results.csv')
     csv_exists = os.path.exists(rmsd_csv_path)
     filtered_config = {k: v for k, v in config.items() 
-                if k not in ['helix_loss_min', 'helix_loss_max', 'length_min', 'length_max']}
+                if k not in ['helix_loss_min', 'helix_loss_max', 'length_min', 'length_max', 'seed']}
     for yaml_path in Path(yaml_dir).glob('*.yaml'):
         if yaml_path.name.endswith('.yaml'):
                 target_binder_input = yaml_path.stem
                 for itr in range(design_samples):
+                    if config.get('seed') is not None:
+                        seed_everything(int(config['seed']) + itr)
+                        print(f"[seed] {int(config['seed']) + itr}")
                     config['length'] = random.randint(config['length_min'],config['length_max'])
                     filtered_config['length'] = config['length']
                     loss_scales['helix_loss'] = random.uniform(config['helix_loss_min'], config['helix_loss_max'])
@@ -1543,6 +1925,18 @@ def run_highss_design(
                         disulfide_angle_tolerance=disulfide_angle_tolerance,
                         disulfide_dihedral_target_abs=disulfide_dihedral_target_abs,
                         disulfide_dihedral_tolerance=disulfide_dihedral_tolerance,
+                        disulfide_grad_steps=disulfide_grad_steps,
+                        debug_grad_norm=debug_grad_norm,
+                        disulfide_sds_scale=disulfide_sds_scale,
+                        disulfide_sds_samples=disulfide_sds_samples,
+                        disulfide_sds_sigma_lo=disulfide_sds_sigma_lo,
+                        disulfide_sds_sigma_hi=disulfide_sds_sigma_hi,
+                        disulfide_sds_clip=disulfide_sds_clip,
+                        disulfide_sds_profile_every=disulfide_sds_profile_every,
+                        disulfide_sds_profile_t=disulfide_sds_profile_t,
+                        disulfide_distogram_lo=disulfide_distogram_lo,
+                        disulfide_distogram_hi=disulfide_distogram_hi,
+                        disulfide_distogram_form=disulfide_distogram_form,
                     )
                     print('warm up done')     
                     output, output_apo, best_batch, best_batch_apo, best_structure, best_structure_apo ,distogram_history_2, sequence_history_2, loss_history_2, con_loss_history, i_con_loss_history, plddt_loss_history, traj_coords_list_2, traj_plddt_list_2, structure = boltz_hallucination(
@@ -1575,6 +1969,18 @@ def run_highss_design(
                         disulfide_angle_tolerance=disulfide_angle_tolerance,
                         disulfide_dihedral_target_abs=disulfide_dihedral_target_abs,
                         disulfide_dihedral_tolerance=disulfide_dihedral_tolerance,
+                        disulfide_grad_steps=disulfide_grad_steps,
+                        debug_grad_norm=debug_grad_norm,
+                        disulfide_sds_scale=disulfide_sds_scale,
+                        disulfide_sds_samples=disulfide_sds_samples,
+                        disulfide_sds_sigma_lo=disulfide_sds_sigma_lo,
+                        disulfide_sds_sigma_hi=disulfide_sds_sigma_hi,
+                        disulfide_sds_clip=disulfide_sds_clip,
+                        disulfide_sds_profile_every=disulfide_sds_profile_every,
+                        disulfide_sds_profile_t=disulfide_sds_profile_t,
+                        disulfide_distogram_lo=disulfide_distogram_lo,
+                        disulfide_distogram_hi=disulfide_distogram_hi,
+                        disulfide_distogram_form=disulfide_distogram_form,
                     )
                     loss_history.extend(loss_history_2)
                     distogram_history.extend(distogram_history_2) 
